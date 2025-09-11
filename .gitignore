@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+.venv
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Data
+/data/
+*.csv
+*.tsv
+*.xlsx
+*.h5
+*.pkl
+
+# Models
+/models/
+*.h5
+*.pt
+*.pth
+*.joblib
+*.sav
+
+
+logs/
+result/
+models/
+env/
+venv/
+m2d/
+
+.github/

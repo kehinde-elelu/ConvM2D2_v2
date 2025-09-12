@@ -1,0 +1,45 @@
+
+Main signals: Train MSE 0.13 vs val 0.197 (moderate generalization gap) and quite large conformal q_hat (~0.78) → model underfits + noisy targets. Suggestions:
+
+Data / targets
+
+Inspect MOS label variance; if multiple ratings per file exist, average or use distributional targets (already soft, maybe increase sigma from 0.25 → 0.35–0.45).
+Stratify batches by MOS to avoid mini-batch score drift.
+Add simple augmentations: small gain, mild noise, time-shift, time-stretch (avoid heavy distortions that change quality).
+Clip or winsorize extreme MOS if rare.
+Model
+
+Try transformer head (you already have) with larger hidden, or 2 encoder layers.
+Add EMD/Wasserstein loss between predicted distribution and Gaussian-soft target (ordinal-friendly).
+Add temperature parameter on logits; learnable scaling can stabilize bin usage.
+Use both ordinal loss + MSE (multi-task) with small λ (e.g. total = KL + 0.2 * MSE).
+Fine-tuning upstream
+
+Currently fully frozen; unfreeze last 1–2 blocks after head is stable (epoch >5) with lower LR (e.g. 1e-5) for those params; often yields clear MOS gain.
+Add layer-wise LR decay.
+Optimization
+
+Use cosine or OneCycle LR instead of flat LR.
+Warmup (e.g. 1k steps) to avoid early sharp jumps (you see mid-epoch OrdinalLoss spikes).
+Enable AMP (torch.cuda.amp) for speed → larger batch size.
+Add EMA of head weights (decay ~0.999) for evaluation.
+Regularization / stabilization
+
+Slightly increase dropout (0.1 → 0.2) if overfitting appears; if not, reduce to 0.05.
+Gradient clipping (1.0) to reduce occasional loss spikes.
+Weight decay tune (try 5e-3 or 5e-5).
+Evaluation
+
+Track SRCC / PLCC; optimizing only MSE may hide ranking issues.
+Plot predicted vs true MOS scatter; look for compression toward mean (likely—consider adding variance encouraging term: encourage higher entropy early then anneal).
+Conformal
+
+Calibrate after selecting final model (currently recalibrated every epoch). Save calibration set unused during training.
+Try adaptive (asymmetric) residual modeling: separate quantiles for upper/lower.
+Distribution head tweaks
+
+Increase num_bins (e.g. 40) with adjusted sigma; finer expectation sometimes helps.
+Or switch to direct regression + ordinal auxiliary: predict scalar + pairwise ranking loss.
+Loss extensions
+
+Add EMD example

@@ -2,15 +2,14 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # add project root
 
-import torch, torchaudio
+import torch
 import warnings
-from torch.utils.data import DataLoader, Sampler, Dataset
+from torch.utils.data import DataLoader, Sampler
 from typing import List
 import argparse
 import datetime
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger
 from NNmodel import PredictionHead, TransformerPredictionHead
-from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler
 
 
 # Optional: add external M2D repo root if different from this project
@@ -25,6 +24,113 @@ except ModuleNotFoundError as e:
         "Cannot import m2d. Ensure the M2D repo exists and has an __init__.py or run: pip install -e /egr/research-deeptech/elelukeh/MOS_project/M2D"
     ) from e
 
+
+def split_for_calibration(files: List[str], scores: List[float], calib_ratio=0.1):
+    """Split off a calibration subset from training data."""
+    n = len(files)
+    c = max(1, int(n * calib_ratio))
+    # Use last c samples for calibration (or shuffle beforehand for randomness)
+    train_files, calib_files = files[:-c], files[-c:]
+    train_scores, calib_scores = scores[:-c], scores[-c:]
+    return (train_files, train_scores), (calib_files, calib_scores)
+
+class StratifiedBatchSampler(Sampler):
+    """
+    Build balanced mini-batches across MOS strata (quantile bins).
+    """
+    def __init__(self, mos_values, batch_size, n_bins=5, drop_last=False, quantile=True, seed=0):
+        self.mos_values = torch.as_tensor(mos_values, dtype=torch.float)
+        self.batch_size = batch_size
+        self.n_bins = n_bins
+        self.drop_last = drop_last
+        self.quantile = quantile
+        self.rng = torch.Generator()
+        self.rng.manual_seed(seed)
+
+        if quantile:
+            qs = torch.linspace(0, 1, n_bins + 1)
+            self.bin_edges = torch.quantile(self.mos_values, qs)
+            # ensure strictly increasing (handle duplicates)
+            for i in range(1, len(self.bin_edges)):
+                if self.bin_edges[i] <= self.bin_edges[i-1]:
+                    self.bin_edges[i] = self.bin_edges[i-1] + 1e-4
+        else:
+            lo, hi = float(self.mos_values.min()), float(self.mos_values.max()) + 1e-6
+            self.bin_edges = torch.linspace(lo, hi, n_bins + 1)
+
+        self.bin_indices = []
+        for b in range(n_bins):
+            left, right = self.bin_edges[b], self.bin_edges[b+1]
+            if b < n_bins - 1:
+                mask = (self.mos_values >= left) & (self.mos_values < right)
+            else:
+                mask = (self.mos_values >= left) & (self.mos_values <= right)
+            idxs = torch.nonzero(mask, as_tuple=False).flatten().tolist()
+            self.bin_indices.append(idxs)
+
+    def _generate_batches(self):
+        # shuffle each bin
+        shuffled = []
+        for idxs in self.bin_indices:
+            t = torch.tensor(idxs)
+            if len(t) > 0:
+                perm = t[torch.randperm(len(t), generator=self.rng)].tolist()
+            else:
+                perm = []
+            shuffled.append(perm)
+
+        ptrs = [0] * self.n_bins
+        batches = []
+        current = []
+        bin_cycle = list(range(self.n_bins))
+
+        while True:
+            progress = False
+            for b in bin_cycle:
+                if ptrs[b] < len(shuffled[b]):
+                    current.append(shuffled[b][ptrs[b]])
+                    ptrs[b] += 1
+                    progress = True
+                    if len(current) == self.batch_size:
+                        batches.append(current)
+                        current = []
+                if all(ptrs[i] >= len(shuffled[i]) for i in range(self.n_bins)):
+                    break
+            if not progress:
+                break
+
+        if len(current) and not self.drop_last:
+            batches.append(current)
+        return batches
+
+    def __iter__(self):
+        for batch in self._generate_batches():
+            yield batch
+
+    def __len__(self):
+        total = len(self.mos_values)
+        if self.drop_last:
+            return total // self.batch_size
+        return (total + self.batch_size - 1) // self.batch_size
+
+def build_loaders(train_files, train_scores, calib_files, calib_scores,
+                  valid_files, valid_scores, loader, preproc,
+                  batch_size_train=32, batch_size_eval=8, num_workers=4,
+                  stratified=False, strat_bins=5):
+    trainset = AudioMOSDataset(train_files, train_scores, loader, preproc)
+    calibset = AudioMOSDataset(calib_files, calib_scores, loader, preproc)
+    validset = AudioMOSDataset(valid_files, valid_scores, loader, preproc)
+
+    if stratified:
+        print("Using stratified batching...")
+        sampler = StratifiedBatchSampler(train_scores, batch_size=batch_size_train, n_bins=strat_bins, quantile=True)
+        trainloader = DataLoader(trainset, batch_sampler=sampler, num_workers=num_workers)
+    else:
+        trainloader = DataLoader(trainset, batch_size=batch_size_train, shuffle=True, num_workers=num_workers)
+
+    calibloader = DataLoader(calibset, batch_size=batch_size_eval, shuffle=False, num_workers=max(1, num_workers//2))
+    validloader = DataLoader(validset, batch_size=batch_size_eval, shuffle=False, num_workers=max(1, num_workers//2))
+    return trainloader, calibloader, validloader
 
 def forward_feature(model, wave, device, keep_sequence=True):
     with torch.no_grad():
@@ -116,10 +222,6 @@ def parse_args():
     ap.add_argument("--stratified_batches", action="store_true",
                     help="Enable stratified MOS-balanced mini-batches for training.")
     ap.add_argument("--strat_bins", type=int, default=5, help="Number of MOS bins for stratified batching.")
-    ap.add_argument("--use_augment", action="store_true",
-                    help="Enable simple waveform augmentations (gain, noise, shift, stretch) for training.")
-    ap.add_argument("--augment_p", type=float, default=0.5,
-                    help="Per-augmentation application probability (shared).")
     return ap.parse_args()
 
 
@@ -146,20 +248,12 @@ def main():
         loader = AudioLoader()
         preproc = Preprocessor(T=16000 * 5)
 
-        augment = None
-        if args.use_augment:
-            augment = SimpleAugment(p=args.augment_p)
-            log(f"[INFO] Data augmentation enabled (p={args.augment_p})")
-            log("  - Gain ±{:.1f} dB | Noise SNR [{:.1f}, {:.1f}] dB".format(augment.max_gain_db, *augment.noise_snr_range))
-            log(augment)
-
         trainloader, calibloader, validloader = build_loaders(
             train_files, train_scores, calib_files, calib_scores,
             valid_list, mos_valids_list, loader, preproc,
             batch_size_train=args.batch_size,
             stratified=args.stratified_batches,
-            strat_bins=args.strat_bins,
-            augment=augment
+            strat_bins=args.strat_bins
         )
         # Add test loader
         testset = AudioMOSDataset(test_list, mos_tests_list, loader, preproc)
@@ -245,13 +339,13 @@ if __name__ == "__main__":
     main()
 
 # python src/pipeline2.py --use_transformer_head
-# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --use_augment 
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5
 
 '''
 Ideas:
     Datasets:
     1. Stratify batches by MOS to avoid mini-batch score drift. (DONE)
-    2. Add simple augmentations: small gain, mild noise, time-shift, time-stretch (avoid heavy distortions that change quality). (DONE via --use_augment)
+    2. Add simple augmentations: small gain, mild noise, time-shift, time-stretch (avoid heavy distortions that change quality).
     3. Clip or winsorize extreme MOS if rare
     4. Try different upstream models (e.g., Wav2CLIP, HuBERT, WavLM, etc.)
     

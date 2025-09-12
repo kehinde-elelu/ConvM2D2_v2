@@ -11,7 +11,9 @@ from torch.utils.data import DataLoader
 # Make project root importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, PredictionHead
+from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset
+from NNmodel import PredictionHead, TransformerPredictionHead
+
 
 EXTERNAL_M2D_ROOT = "/egr/research-deeptech/elelukeh/MOS_project/M2D"
 if os.path.isdir(os.path.join(EXTERNAL_M2D_ROOT, "m2d")) and EXTERNAL_M2D_ROOT not in sys.path:
@@ -48,6 +50,8 @@ def parse_args():
                     help="Index after splitting filename by delimiter.")
     ap.add_argument("--cond_bins", type=int, default=4,
                     help="Quantile bins for conditional coverage (0 disables).")
+    ap.add_argument("--use_transformer_head", action="store_true",
+                    help="Use single-layer transformer + attention pooling head.")
     return ap.parse_args()
 
 
@@ -245,7 +249,9 @@ def main():
         p.requires_grad = False
 
     # Prediction head
-    head = PredictionHead(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
+    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
+    print('Using head class: ' + str(head_cls))
+    head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
     q_hat = None
     alpha = None
@@ -394,3 +400,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python src/predict.py --use_transformer_head

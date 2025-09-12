@@ -2,15 +2,14 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # add project root
 
-import torch, torchaudio
+import torch
 import warnings
-from torch.utils.data import DataLoader, Sampler, Dataset
+from torch.utils.data import DataLoader
 from typing import List
 import argparse
 import datetime
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger
-from NNmodel import PredictionHead, TransformerPredictionHead
-from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler
+from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
 
 
 # Optional: add external M2D repo root if different from this project
@@ -25,6 +24,27 @@ except ModuleNotFoundError as e:
         "Cannot import m2d. Ensure the M2D repo exists and has an __init__.py or run: pip install -e /egr/research-deeptech/elelukeh/MOS_project/M2D"
     ) from e
 
+
+def split_for_calibration(files: List[str], scores: List[float], calib_ratio=0.1):
+    """Split off a calibration subset from training data."""
+    n = len(files)
+    c = max(1, int(n * calib_ratio))
+    # Use last c samples for calibration (or shuffle beforehand for randomness)
+    train_files, calib_files = files[:-c], files[-c:]
+    train_scores, calib_scores = scores[:-c], scores[-c:]
+    return (train_files, train_scores), (calib_files, calib_scores)
+
+def build_loaders(train_files, train_scores, calib_files, calib_scores,
+                  valid_files, valid_scores, loader, preproc,
+                  batch_size_train=32, batch_size_eval=8, num_workers=4):
+    trainset = AudioMOSDataset(train_files, train_scores, loader, preproc)
+    calibset = AudioMOSDataset(calib_files, calib_scores, loader, preproc)
+    validset = AudioMOSDataset(valid_files, valid_scores, loader, preproc)
+
+    trainloader = DataLoader(trainset, batch_size=batch_size_train, shuffle=True, num_workers=num_workers)
+    calibloader = DataLoader(calibset, batch_size=batch_size_eval, shuffle=False, num_workers=max(1, num_workers//2))
+    validloader = DataLoader(validset, batch_size=batch_size_eval, shuffle=False, num_workers=max(1, num_workers//2))
+    return trainloader, calibloader, validloader
 
 def forward_feature(model, wave, device, keep_sequence=True):
     with torch.no_grad():
@@ -100,7 +120,7 @@ def apply_intervals(preds: torch.Tensor, q_hat: float, low=1.0, high=5.0):
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type=int, default=1000)
+    ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--calib_ratio", type=float, default=0.1, help="Fraction of training set for calibration")
     ap.add_argument("--alpha", type=float, default=0.1, help="Miscoverage level for conformal intervals")
     ap.add_argument("--batch_size", type=int, default=32)
@@ -113,13 +133,6 @@ def parse_args():
     ap.add_argument("--min_delta", type=float, default=1e-4, help="Minimum decrease in validation MSE to count as improvement")
     ap.add_argument("--use_transformer_head", action="store_true",
                     help="Use single-layer transformer + attention pooling head.")
-    ap.add_argument("--stratified_batches", action="store_true",
-                    help="Enable stratified MOS-balanced mini-batches for training.")
-    ap.add_argument("--strat_bins", type=int, default=5, help="Number of MOS bins for stratified batching.")
-    ap.add_argument("--use_augment", action="store_true",
-                    help="Enable simple waveform augmentations (gain, noise, shift, stretch) for training.")
-    ap.add_argument("--augment_p", type=float, default=0.5,
-                    help="Per-augmentation application probability (shared).")
     return ap.parse_args()
 
 
@@ -146,20 +159,10 @@ def main():
         loader = AudioLoader()
         preproc = Preprocessor(T=16000 * 5)
 
-        augment = None
-        if args.use_augment:
-            augment = SimpleAugment(p=args.augment_p)
-            log(f"[INFO] Data augmentation enabled (p={args.augment_p})")
-            log("  - Gain ±{:.1f} dB | Noise SNR [{:.1f}, {:.1f}] dB".format(augment.max_gain_db, *augment.noise_snr_range))
-            log(augment)
-
         trainloader, calibloader, validloader = build_loaders(
             train_files, train_scores, calib_files, calib_scores,
             valid_list, mos_valids_list, loader, preproc,
-            batch_size_train=args.batch_size,
-            stratified=args.stratified_batches,
-            strat_bins=args.strat_bins,
-            augment=augment
+            batch_size_train=args.batch_size
         )
         # Add test loader
         testset = AudioMOSDataset(test_list, mos_tests_list, loader, preproc)
@@ -245,13 +248,13 @@ if __name__ == "__main__":
     main()
 
 # python src/pipeline2.py --use_transformer_head
-# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --use_augment 
+
 
 '''
 Ideas:
     Datasets:
-    1. Stratify batches by MOS to avoid mini-batch score drift. (DONE)
-    2. Add simple augmentations: small gain, mild noise, time-shift, time-stretch (avoid heavy distortions that change quality). (DONE via --use_augment)
+    1. Stratify batches by MOS to avoid mini-batch score drift.
+    2. Add simple augmentations: small gain, mild noise, time-shift, time-stretch (avoid heavy distortions that change quality).
     3. Clip or winsorize extreme MOS if rare
     4. Try different upstream models (e.g., Wav2CLIP, HuBERT, WavLM, etc.)
     

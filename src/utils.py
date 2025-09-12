@@ -37,6 +37,9 @@ def load_mos_txt(txt_path, wav_dir):
 
 # 1. Input Audio File
 class AudioLoader:
+    '''
+    Load audio file and convert to mono waveform tensor.
+    '''
     def __init__(self, sample_rate=16000):
         self.sample_rate = sample_rate
     def load(self, filepath):
@@ -48,6 +51,10 @@ class AudioLoader:
 
 # 2. Preprocessing
 class Preprocessor:
+    '''
+    Process waveform to fixed length T (in samples).
+    If shorter, pad with zeros. If longer, truncate.
+    '''
     def __init__(self, T):
         self.T = T
     def process(self, waveform):
@@ -75,71 +82,7 @@ class AudioMOSDataset(Dataset):
         proc_wave = self.preproc.process(waveform)    #torch.Size([80000])
         mos = torch.tensor(self.mos_scores[idx], dtype=torch.float32)
         return proc_wave, mos
-    
-# 4. Prediction Head
-# class PredictionHead(torch.nn.Module):
-#     def __init__(self, num_bins=5):
-#         super().__init__()
-#         self.fc = torch.nn.Linear(512, num_bins)
-#         self.softmax = torch.nn.Softmax(dim=-1)
-#         self.bins = torch.linspace(1, 5, num_bins)
-#     def forward(self, features):
-#         logits = self.fc(features)
-#         probs = self.softmax(logits)
-#         expected_mos = (probs * self.bins).sum(dim=-1)
-#         return probs, expected_mos
 
-class PredictionHead(torch.nn.Module):
-    """
-    Ordinal-aware MOS predictor via classification over K bins (1..5) with Gaussian label softening.
-    """
-    def __init__(self, in_dim=768, num_bins=20, hidden=256, dropout=0.1):
-        super().__init__()
-        self.num_bins = num_bins
-        # Equal-width bin centers from 1 to 5 inclusive
-        self.register_buffer("bins", torch.linspace(1.0, 5.0, num_bins))
-        self.net = torch.nn.Sequential(
-            torch.nn.LayerNorm(in_dim),
-            torch.nn.Linear(in_dim, hidden),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden, num_bins)
-        )
-
-    def forward(self, features):
-        """
-        features: (B, in_dim)
-        Returns:
-          logits: (B, K)
-          probs:  (B, K)
-          expected_mos: (B,)
-        """
-        logits = self.net(features)
-        probs = torch.softmax(logits, dim=-1)
-        expected = (probs * self.bins).sum(dim=-1)
-        return logits, probs, expected
-
-    @torch.no_grad()
-    def build_soft_targets(self, mos, sigma=0.25):
-        """
-        mos: (B,) continuous scores in [1,5]
-        Returns soft target distribution (B, K) using Gaussian kernel:
-        y_k ∝ exp(-(s - c_k)^2 / (2 σ^2))
-        """
-        diff2 = (mos.unsqueeze(1) - self.bins.unsqueeze(0)) ** 2
-        weights = torch.exp(-diff2 / (2 * sigma * sigma))
-        return weights / weights.sum(dim=1, keepdim=True)
-
-    def ordinal_loss(self, logits, soft_targets):
-        """
-        KL divergence between predicted log-probs and soft targets.
-        """
-        log_probs = torch.log_softmax(logits, dim=-1)
-        return torch.nn.functional.kl_div(log_probs, soft_targets, reduction="batchmean")
-
-    def mse_monitor(self, expected_mos, target_mos):
-        return torch.nn.functional.mse_loss(expected_mos, target_mos)
-    
 
 
 

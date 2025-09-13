@@ -9,8 +9,13 @@ from typing import List
 import argparse
 import datetime
 import torch.optim as optim
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+# import laion_clap
 from transformers import Wav2Vec2Model
-from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature
+from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature, export_learning_curves, apply_intervals
 from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
 from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler
 
@@ -90,11 +95,6 @@ def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print,
     q_hat = torch.quantile(residuals, 1 - alpha).item()
     log(f"Conformal calibration | alpha={alpha:.3f} | q_hat={q_hat:.4f}")
     return q_hat
-
-def apply_intervals(preds: torch.Tensor, q_hat: float, low=1.0, high=5.0):
-    lower = (preds - q_hat).clamp(min=low, max=high)
-    upper = (preds + q_hat).clamp(min=low, max=high)
-    return lower, upper
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -210,6 +210,9 @@ def main():
         early_stopped = False
         last_saved_epoch = None
 
+        # Track metrics for plotting
+        metrics = {"train_mse": [], "valid_mse": [], "q_hat": []}
+
         # 3. Training Loop
         for epoch in range(1, args.epochs + 1):
             log(f"\n=== Epoch {epoch}/{args.epochs} ===")
@@ -225,6 +228,11 @@ def main():
                 head, model, calibloader, device, alpha=args.alpha, log=log, seq_mode=args.use_transformer_head
             )
             q_hat_final = q_hat
+
+            # Save metrics
+            metrics["train_mse"].append(train_mse)
+            metrics["valid_mse"].append(valid_mse)
+            metrics["q_hat"].append(q_hat)
 
             improvement = (best_valid_mse - valid_mse) > args.min_delta
             if improvement:
@@ -247,6 +255,16 @@ def main():
                     log(f"Early stopping triggered at epoch {epoch}")
                     early_stopped = True
                     break
+
+        # Export metrics and plot learning curves
+        if metrics["train_mse"]:
+            _out = export_learning_curves(
+                metrics=metrics,
+                out_dir=args.out_dir,
+                upstream=args.upstream,
+                last_saved_epoch=last_saved_epoch,
+                log=log
+            )
 
         if early_stopped:
             log(f"Early stopped. Best checkpoint was from epoch {last_saved_epoch}. Reloading for test...")

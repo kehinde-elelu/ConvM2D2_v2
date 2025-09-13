@@ -3,6 +3,7 @@ import warnings
 import torch, torchaudio
 import datetime
 from torch.utils.data.dataset import Dataset
+import matplotlib.pyplot as plt
 
 warnings.filterwarnings(
     "ignore",
@@ -128,3 +129,60 @@ def forward_feature(model, wave, device, keep_sequence=True):
         # if not keep_sequence and feats.dim() > 2:
         #     feats = feats.mean(dim=1)
     return feats
+
+
+def export_learning_curves(metrics, out_dir, upstream, last_saved_epoch, log):
+    """
+    Save metrics.csv and learning_curve_<upstream>.png. Returns dict with paths and best_epoch.
+    """
+    if not metrics.get("train_mse"):
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+
+    # CSV
+    csv_path = os.path.join(out_dir, "metrics.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["epoch", "train_mse", "valid_mse", "q_hat"])
+        for i in range(len(metrics["train_mse"])):
+            w.writerow([
+                i + 1,
+                metrics["train_mse"][i],
+                metrics["valid_mse"][i] if i < len(metrics["valid_mse"]) else "",
+                metrics["q_hat"][i] if i < len(metrics["q_hat"]) else ""
+            ])
+
+    # Best/early-stop epoch
+    if metrics.get("valid_mse"):
+        if last_saved_epoch is not None:
+            best_epoch = last_saved_epoch
+        else:
+            best_epoch = min(range(len(metrics["valid_mse"])), key=lambda i: metrics["valid_mse"][i]) + 1
+    else:
+        best_epoch = len(metrics["train_mse"])
+
+    # Plot
+    epochs = list(range(1, len(metrics["train_mse"]) + 1))
+    plt.figure(figsize=(8, 4.5))
+    plt.plot(epochs, metrics["train_mse"], label="Train MSE")
+    if metrics.get("valid_mse"):
+        plt.plot(epochs, metrics["valid_mse"], label="Valid MSE")
+    plt.axvline(best_epoch, color="red", linestyle="--", alpha=0.7, label=f"Best/Early stop @ {best_epoch}")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE")
+    plt.title(f"Learning Curves ({upstream})")
+    plt.legend()
+    plt.tight_layout()
+    png_path = os.path.join(out_dir, f"learning_curve_{upstream}.png")
+    plt.savefig(png_path, dpi=150)
+    plt.close()
+
+    log(f"[PLOT] Saved learning curve to {png_path}")
+    log(f"[PLOT] Saved metrics CSV to {csv_path}")
+    return {"csv_path": csv_path, "png_path": png_path, "best_epoch": best_epoch}
+
+
+def apply_intervals(preds: torch.Tensor, q_hat: float, low=1.0, high=5.0):
+    lower = (preds - q_hat).clamp(min=low, max=high)
+    upper = (preds + q_hat).clamp(min=low, max=high)
+    return lower, upper

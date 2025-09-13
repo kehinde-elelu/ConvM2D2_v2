@@ -13,7 +13,7 @@ from transformers import Wav2Vec2Model
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, forward_feature
-from NNmodel import PredictionHead, TransformerPredictionHead
+from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
 
 
 EXTERNAL_M2D_ROOT = "/egr/research-deeptech/elelukeh/MOS_project/M2D"
@@ -253,7 +253,7 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
+    head_cls = TransformerPredictionHead1 if args.use_transformer_head else PredictionHead
     head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
     # Load checkpoint

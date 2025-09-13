@@ -22,7 +22,7 @@ M2D_WEIGHT="/egr/research-deeptech/elelukeh/MOS_project/M2D/m2d/models_m2d/m2d_c
 
 # HF cache & model id for wav2vec2
 HF_CACHE_DIR="models/hf"
-WAV2VEC_MODEL="facebook/wav2vec2-large-960h"
+WAV2VEC_MODEL="facebook/wav2vec2-base"
 
 # Common runtime args
 BATCH_SIZE=8

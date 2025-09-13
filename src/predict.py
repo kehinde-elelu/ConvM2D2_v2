@@ -7,11 +7,12 @@ import torch
 import scipy.stats
 import datetime
 from torch.utils.data import DataLoader
+from transformers import Wav2Vec2Model
 
 # Make project root importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset
+from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, forward_feature
 from NNmodel import PredictionHead, TransformerPredictionHead
 
 
@@ -32,7 +33,7 @@ def parse_args():
     ap.add_argument("--test_list", type=str, default="data/main/DATA/sets/test_mos_list.txt",
                     help="Text file with '<rel_path> <score>' per line.")
     ap.add_argument("--wav_dir", type=str, default="data/main/DATA/wav", help="Base directory for wav files.")
-    ap.add_argument("--checkpoint", type=str, default="models/checkpoint_head.pt",
+    ap.add_argument("--checkpoint", type=str, default=f"models/checkpoint_head.pt",
                     help="Checkpoint produced by pipeline2.py (contains head_state & q_hat).")
     ap.add_argument("--weight",
                     default="/egr/research-deeptech/elelukeh/MOS_project/M2D/m2d/models_m2d/m2d_clap_vit_base-80x608p16x16-240128/checkpoint-300.pth",
@@ -52,53 +53,35 @@ def parse_args():
                     help="Quantile bins for conditional coverage (0 disables).")
     ap.add_argument("--use_transformer_head", action="store_true",
                     help="Use single-layer transformer + attention pooling head.")
+    # NEW upstream selector
+    ap.add_argument("--upstream", type=str, choices=["m2d", "wav2vec"], default="m2d",
+                    help="Select upstream feature extractor (match training).")
+    ap.add_argument("--wav2vec_model", type=str, default="facebook/wav2vec2-base",
+                    help="HF model id when --upstream wav2vec.")
+    ap.add_argument("--hf_cache_dir", type=str, default="./models/hf",
+                    help="Local cache dir for HF models to avoid $HOME quota.")
     return ap.parse_args()
 
 
-def forward_feature(model, wave):
-    with torch.no_grad():
-        wav_embed = model.encode_clap_audio(wave)
-        if wav_embed.dim() > 2:
-            wav_embed = wav_embed.mean(dim=1)
-    return wav_embed
-
-
-def extract_system_id(path, mode="filename_prefix", delim="_", idx=0):
-    fname = os.path.basename(path)
-    stem = os.path.splitext(fname)[0]
-    if mode == "parent_dir":
-        return os.path.basename(os.path.dirname(path)) or "UNKNOWN"
-    parts = stem.split(delim)
-    if idx < len(parts):
-        return parts[idx]
-    return parts[0]
-
-
 @torch.no_grad()
-def predict(model, head, loader, device):
+def predict(model, head, loader, device, upstream, seq_mode):
     """
-    Run prediction over loader.
-    Supports dataset batches shaped as:
-      (waves, mos)  OR  (waves, mos, meta)
-    Attempts to recover file paths from:
-      1) meta (list or dict with 'path')
-      2) loader.dataset.files (if present)
-      3) falls back to 'UNKNOWN'
+        Run prediction over loader.
+        Supports dataset batches shaped as:
+        (waves, mos)  OR  (waves, mos, meta)
+        Attempts to recover file paths from:
+        1) meta (list or dict with 'path')
+        2) loader.dataset.files (if present)
+        3) falls back to 'UNKNOWN'
     """
     head.eval()
     preds = []
     targets = []
     filepaths = []
-    sample_index = 0  # track position for fallback path recovery
-
-    ds_files = None
-    if hasattr(loader, "dataset"):
-        # Common attribute name used in many custom datasets
-        if hasattr(loader.dataset, "files"):
-            ds_files = getattr(loader.dataset, "files")
+    sample_index = 0
+    ds_files = getattr(loader.dataset, "files", None)
 
     for batch in loader:
-        # Unpack flexible batch formats
         if isinstance(batch, (list, tuple)):
             if len(batch) == 3:
                 waves, mos, meta = batch
@@ -108,45 +91,35 @@ def predict(model, head, loader, device):
             else:
                 raise ValueError(f"Unexpected batch length: {len(batch)}")
         else:
-            raise ValueError("Batch is not a tuple/list; cannot unpack.")
+            raise ValueError("Batch is not a tuple/list.")
 
-        if isinstance(waves, list):  # safety
+        if isinstance(waves, list):
             waves = torch.stack(waves, dim=0)
 
         waves = waves.to(device)
         mos = mos.to(device)
 
-        wav_embed = forward_feature(model, waves)
+        wav_embed = forward_feature(model, waves, device=device, keep_sequence=seq_mode)
         _, _, pred_mos = head(wav_embed)
 
         preds.append(pred_mos.cpu())
         targets.append(mos.cpu())
 
-        batch_size = waves.size(0)
-
-        # Resolve file paths
+        bsz = waves.size(0)
         if meta is not None:
             if isinstance(meta, list):
                 filepaths.extend(meta)
             elif isinstance(meta, dict) and "path" in meta:
-                # meta['path'] could be list or single path
-                if isinstance(meta["path"], list):
-                    filepaths.extend(meta["path"])
+                p = meta["path"]
+                if isinstance(p, list):
+                    filepaths.extend(p)
                 else:
-                    filepaths.extend([meta["path"]] * batch_size)
+                    filepaths.extend([p] * bsz)
             else:
-                # meta present but unusable
-                if ds_files is not None:
-                    filepaths.extend(ds_files[sample_index: sample_index + batch_size])
-                else:
-                    filepaths.extend(["UNKNOWN"] * batch_size)
+                filepaths.extend(ds_files[sample_index: sample_index + bsz] if ds_files else ["UNKNOWN"] * bsz)
         else:
-            if ds_files is not None:
-                filepaths.extend(ds_files[sample_index: sample_index + batch_size])
-            else:
-                filepaths.extend(["UNKNOWN"] * batch_size)
-
-        sample_index += batch_size
+            filepaths.extend(ds_files[sample_index: sample_index + bsz] if ds_files else ["UNKNOWN"] * bsz)
+        sample_index += bsz
 
     preds = torch.cat(preds).numpy()
     targets = torch.cat(targets).numpy()
@@ -228,31 +201,62 @@ def build_loader(files, scores, batch_size, num_workers, preproc):
     return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
 
+# ADD: system id extractor (was missing -> NameError)
+def extract_system_id(path, mode="filename_prefix", delim="_", idx=0):
+    """
+    Derive a system identifier from a file path.
+    mode=filename_prefix: take filename (without extension), split by delim, pick part idx
+    mode=parent_dir: take immediate parent directory name
+    """
+    fname = os.path.basename(path)
+    stem, _ext = os.path.splitext(fname)
+    if mode == "parent_dir":
+        parent = os.path.basename(os.path.dirname(path))
+        return parent if parent else stem
+    parts = stem.split(delim)
+    if 0 <= idx < len(parts):
+        return parts[idx]
+    return stem  # fallback
+
+
 def main():
     args = parse_args()
-    os.makedirs(args.out_result, exist_ok=True) 
+    os.makedirs(args.out_result, exist_ok=True)
+    if args.upstream == "wav2vec":
+        os.makedirs(args.hf_cache_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Data
     test_files, test_scores = load_mos_txt(args.test_list, args.wav_dir)
     preproc = Preprocessor(T=16000 * 5)
     test_loader = build_loader(test_files, test_scores, args.batch_size, args.num_workers, preproc)
     print(f"Loaded {len(test_files)} test samples.")
-    print(test_loader)
 
-    # Upstream model (frozen)
-    UPSTREAM_OUT_DIM = 768
-    model = PortableM2D(weight_file=args.weight, flat_features=True).to(device)
+    # Upstream
+    if args.upstream == "m2d":
+        print(f"====[INFO] Loading M2D model from {args.weight}====")
+        UPSTREAM_OUT_DIM = 768
+        model = PortableM2D(weight_file=args.weight, flat_features=True).to(device)
+        print("====[INFO] Using M2D upstream.====")
+    else:
+        print(f"====[INFO] Loading Wav2Vec2 model: {args.wav2vec_model}====")
+        print(f"Loading Wav2Vec2: {args.wav2vec_model}")
+        model = Wav2Vec2Model.from_pretrained(
+            args.wav2vec_model,
+            cache_dir="/egr/research-deeptech/elelukeh/MOS_project/ConvM2D2V2/models/hf"
+        ).to(device)
+        UPSTREAM_OUT_DIM = model.config.hidden_size
+        # print(f"Wav2Vec2 hidden size: {UPSTREAM_OUT_DIM}")
+        print(f"====[INFO] Using Wav2Vec2 upstream.====")
+
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
 
-    # Prediction head
     head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
-    print('Using head class: ' + str(head_cls))
     head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
+    # Load checkpoint
     q_hat = None
     alpha = None
     if os.path.isfile(args.checkpoint):
@@ -263,11 +267,13 @@ def main():
         alpha = ckpt.get("alpha", None)
         print(f"Loaded checkpoint: {args.checkpoint} | q_hat={q_hat} | alpha={alpha}")
     else:
-        print(f"WARNING: Checkpoint {args.checkpoint} not found. Using randomly initialized head.")
+        print(f"WARNING: Checkpoint {args.checkpoint} not found.")
 
-    # Predict
-    filepaths, preds, targets = predict(model, head, test_loader, device)
-    # print(filepaths[:5], preds[:5], targets[:5])
+    filepaths, preds, targets = predict(
+        model, head, test_loader, device,
+        upstream=args.upstream,
+        seq_mode=args.use_transformer_head
+    )
 
     # Conformal intervals
     if (q_hat is not None) and (not args.no_intervals):
@@ -384,7 +390,7 @@ def main():
     # Save predictions CSV
     timestamp = datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
     header = "filepath,system_id,truth_overall,pred_overall,lower,upper"
-    out_csv = os.path.join(args.out_result, f"predictions_{timestamp}.csv")
+    out_csv = os.path.join(args.out_result, f"{args.upstream}_predictions_{timestamp}.csv")
     with open(out_csv, "w") as f:
         f.write(header + "\n")
         for fp, sid, t, p, lo, up in zip(filepaths, system_ids, targets, preds, lower, upper):
@@ -392,7 +398,7 @@ def main():
     print(f"Saved predictions to {out_csv}")
 
     # Save metrics JSON
-    out_json = os.path.join(args.out_result, f"metrics_{timestamp}.json")
+    out_json = os.path.join(args.out_result, f"{args.upstream}_metrics_{timestamp}.json")
     with open(out_json, "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"Saved metrics to {out_json}")
@@ -401,4 +407,7 @@ def main():
 if __name__ == "__main__":
     main()
 
-# python src/predict.py --use_transformer_head
+# python src/predict.py --use_transformer_head --upstream wav2vec --checkpoint models/checkpoint_head_wav2vec.pt 
+
+ 
+# --wav2vec_model facebook/wav2vec2-base --hf_cache_dir ./models/hf_cache --out_result result_wav2vec

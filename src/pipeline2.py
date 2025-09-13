@@ -8,10 +8,14 @@ from torch.utils.data import DataLoader, Sampler, Dataset
 from typing import List
 import argparse
 import datetime
-from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger
-from NNmodel import PredictionHead, TransformerPredictionHead
+import torch.optim as optim
+from transformers import Wav2Vec2Model
+from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature
+from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
 from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler
 
+import random
+random.seed(1984)
 
 # Optional: add external M2D repo root if different from this project
 EXTERNAL_M2D_ROOT = "/egr/research-deeptech/elelukeh/MOS_project/M2D"
@@ -26,12 +30,6 @@ except ModuleNotFoundError as e:
     ) from e
 
 
-def forward_feature(model, wave, device, keep_sequence=True):
-    with torch.no_grad():
-        feats = model.encode_clap_audio(wave)  # expect (B,T,D) or (B,D)
-        if not keep_sequence and feats.dim() > 2:
-            feats = feats.mean(dim=1)
-    return feats
 
 def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log=print, seq_mode=False):
     head.train()
@@ -82,7 +80,7 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
     return preds, targets, mse_mean
 
 @torch.no_grad()
-def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print):
+def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print, seq_mode=False):
     """
     Compute symmetric conformal interval half-width (q_hat) using absolute residuals.
     q_hat = quantile_{1-alpha}( |y - f(x)| )
@@ -120,6 +118,10 @@ def parse_args():
                     help="Enable simple waveform augmentations (gain, noise, shift, stretch) for training.")
     ap.add_argument("--augment_p", type=float, default=0.5,
                     help="Per-augmentation application probability (shared).")
+    ap.add_argument("--upstream", type=str, choices=["m2d", "wav2vec"], default="m2d",
+                    help="Select upstream feature extractor.")
+    ap.add_argument("--wav2vec_model", type=str, default="facebook/wav2vec2-base",
+                    help="HF model id for wav2vec2 when --upstream wav2vec.")
     return ap.parse_args()
 
 
@@ -166,16 +168,37 @@ def main():
         testloader = DataLoader(testset, batch_size=8, shuffle=False, num_workers=2)
 
         # 2. Model Setup
-        # --- Upstream model ---
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('DEVICE: ' + str(device))
-        UPSTREAM_OUT_DIM = 768
-        model = PortableM2D(weight_file=args.weight, flat_features=True).to(device)
 
-        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
+        if args.upstream == "m2d":
+            log(f"====[INFO] Loading M2D model from {args.weight}====")
+            from m2d.examples.portable_m2d import PortableM2D
+            model = PortableM2D(weight_file=args.weight, flat_features=True).to(device)
+            UPSTREAM_OUT_DIM = 768
+            log("====[INFO] Using M2D upstream.====")
+        else:
+            # Wav2Vec2 upstream
+            log(f"====[INFO] Loading Wav2Vec2 model: {args.wav2vec_model}====")
+            model = Wav2Vec2Model.from_pretrained(
+                args.wav2vec_model, 
+                cache_dir="/egr/research-deeptech/elelukeh/MOS_project/ConvM2D2V2/models/hf"
+                ).to(device)
+            UPSTREAM_OUT_DIM = model.config.hidden_size
+            # log(f"====[INFO] Wav2Vec2 hidden size: {UPSTREAM_OUT_DIM}====")
+            log(f"====[INFO] Using Wav2Vec2 upstream.====")
+
+        head_cls = TransformerPredictionHead1 if args.use_transformer_head else PredictionHead
         print('Using head class: ' + str(head_cls))
         head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
-        optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
+        # optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
+        optimizer = optim.SGD(head.parameters(), lr=5e-4, momentum=0.9)    
+
+        log(f"[DEVICE] torch.cuda.is_available={torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            log(f"[DEVICE] current cuda index={torch.cuda.current_device()} name={torch.cuda.get_device_name()}")
+        log(f"[DEVICE] Model first param device: {next(model.parameters()).device}")
+        log(f"[DEVICE] Head first param device: {next(head.parameters()).device}")
 
         model.eval()
         for p in model.parameters():
@@ -185,6 +208,7 @@ def main():
         q_hat_final = None
         patience_ctr = 0
         early_stopped = False
+        last_saved_epoch = None
 
         # 3. Training Loop
         for epoch in range(1, args.epochs + 1):
@@ -198,7 +222,7 @@ def main():
                 head, model, validloader, device, desc="Validation (point)", log=log, seq_mode=args.use_transformer_head
             )
             q_hat = conformal_calibrate(
-                head, model, calibloader, device, alpha=args.alpha, log=log
+                head, model, calibloader, device, alpha=args.alpha, log=log, seq_mode=args.use_transformer_head
             )
             q_hat_final = q_hat
 
@@ -206,7 +230,7 @@ def main():
             if improvement:
                 best_valid_mse = valid_mse
                 patience_ctr = 0
-                ckpt_path = os.path.join(args.out_dir, "checkpoint_head.pt")
+                ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}.pt")
                 torch.save({
                     "head_state": head.state_dict(),
                     "q_hat": q_hat,
@@ -215,6 +239,7 @@ def main():
                     "best_valid_mse": best_valid_mse
                 }, ckpt_path)
                 log(f"Saved checkpoint (best MSE {best_valid_mse:.4f})")
+                last_saved_epoch = epoch
             else:
                 patience_ctr += 1
                 log(f"No improvement (Δ={best_valid_mse - valid_mse:.6f}); patience {patience_ctr}/{args.patience}")
@@ -224,8 +249,8 @@ def main():
                     break
 
         if early_stopped:
-            log("Loading best checkpoint for final test evaluation...")
-            ckpt_path = os.path.join(args.out_dir, f"checkpoint_head.pt")
+            log(f"Early stopped. Best checkpoint was from epoch {last_saved_epoch}. Reloading for test...")
+            ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}.pt")
             if os.path.isfile(ckpt_path):
                 ckpt = torch.load(ckpt_path, map_location="cpu")
                 head.load_state_dict(ckpt["head_state"])
@@ -245,9 +270,28 @@ if __name__ == "__main__":
     main()
 
 # python src/pipeline2.py --use_transformer_head
-# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --use_augment 
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --use_augment (nope dont use augment)
+
+
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream wav2vec
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream m2d 
+# 
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream wav2vec --wav2vec_model facebook/wav2vec2-large
+# python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream m2d --wav2vec_model facebook/wav2vec2-large-960h
+
 
 '''
+Start a new session: tmux
+Start with a name: tmux new -s mysession
+Detach (leave it running): Ctrl+b then d
+List sessions: tmux ls
+Attach to existing: tmux attach -t mysession
+Create if absent (attach or new): tmux new -As mysession
+Kill a session: tmux kill-session -t mysession
+Common splits: Ctrl+b then % (vertical split) Ctrl+b then " (horizontal split)
+Switch panes: Ctrl+b then arrow key
+Exit all panes (ends session) or detach to keep running.
+
 Ideas:
     Datasets:
     1. Stratify batches by MOS to avoid mini-batch score drift. (DONE)

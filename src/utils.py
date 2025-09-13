@@ -111,3 +111,20 @@ def create_logger(log_path: str):
         f.flush()
         print(*args, **kwargs)
     return _log, f
+
+
+def forward_feature(model, wave, device, keep_sequence=True):
+    with torch.no_grad():
+        # wave = torch.Size([32, 1, 80000])
+        if hasattr(model, "encode_clap_audio"): # M2D interface
+            feats = model.encode_clap_audio(wave)
+        else: # Wav2Vec2 interface
+            # Assume HuggingFace Wav2Vec2Model style: input (B,T)
+            if wave.dim() == 3 and wave.size(1) == 1:
+                wave = wave.squeeze(1) 
+            wave = wave.to(device).float()
+            out = model(wave)
+            feats = out.last_hidden_state    # (B, T', D)
+        # if not keep_sequence and feats.dim() > 2:
+        #     feats = feats.mean(dim=1)
+    return feats

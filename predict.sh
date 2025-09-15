@@ -14,21 +14,21 @@ WAV_DIR="data/main/DATA/wav"
 OUT_DIR="result"
 
 # Checkpoint (head + q_hat from training)
-CHECKPOINT_M2D="models/checkpoint_head_m2d.pt"
-CHECKPOINT_W2V="models/checkpoint_head_wav2vec.pt"
+CHECKPOINT_M2D="models/checkpoint_head_m2d_run_20250914_174324.pt"
+CHECKPOINT_W2V="models/checkpoint_head_wav2vec_run_20250914_185149.pt"
 
 # M2D weight file
 M2D_WEIGHT="/egr/research-deeptech/elelukeh/MOS_project/M2D/m2d/models_m2d/m2d_clap_vit_base-80x608p16x16-240128/checkpoint-300.pth"
 
 # HF cache & model id for wav2vec2
 HF_CACHE_DIR="models/hf"
-WAV2VEC_MODEL="facebook/wav2vec2-base"
+WAV2VEC_MODEL="facebook/wav2vec2-large"
 
 # Common runtime args
 BATCH_SIZE=8
 NUM_WORKERS=2
 COND_BINS=4
-USE_TRANSFORMER_HEAD=1   # 1 to enable --use_transformer_head
+USE_TRANSFORMER_HEAD=0   # 1 to enable --use_transformer_head
 
 # ---- Parse optional first arg: upstream ----
 UPSTREAM="${1:-m2d}"   # m2d or wav2vec

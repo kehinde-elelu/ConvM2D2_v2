@@ -16,8 +16,8 @@ import matplotlib.pyplot as plt
 # import laion_clap
 from transformers import Wav2Vec2Model
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature, export_learning_curves, apply_intervals
-from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
-from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler
+from NNmodel import PredictionHead, TransformerPredictionHead
+from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler, extract_weighted_mel_spectrogram
 
 import random
 random.seed(1984)
@@ -34,7 +34,7 @@ except ModuleNotFoundError as e:
         "Cannot import m2d. Ensure the M2D repo exists and has an __init__.py or run: pip install -e /egr/research-deeptech/elelukeh/MOS_project/M2D"
     ) from e
 
-
+save_model_time = datetime.datetime.now().strftime('run_%Y%m%d_%H%M%S')
 
 def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log=print, seq_mode=False):
     head.train()
@@ -45,9 +45,20 @@ def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log
         wave = wave.to(device)
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
+
+        # weighted_mel = extract_weighted_mel_spectrogram(
+        #     wave,
+        #     device,
+        #     window_sizes=[256, 512, 768, 1024],
+        #     hop_lengths=[64, 128, 256, 512],
+        #     n_mels=64, weights=None
+        # )
+
         logits, probs, pred_mos = head(wav_embed)
         soft_targets = head.build_soft_targets(mos, sigma=0.25)
-        loss = head.ordinal_loss(logits, soft_targets)
+        kl_loss = head.ordinal_loss(logits, soft_targets)
+        l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
+        loss = kl_loss + 0.5 * l1_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -65,24 +76,44 @@ def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log
 def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=False):
     head.eval()
     total_mse = 0.0
+    total_loss = 0.0
     n_batches = 0
     preds = []
     targets = []
+    VALSTEPS=0
     for wave, mos in loader:
+        VALSTEPS+=1
         wave = wave.to(device)
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
-        _, _, pred_mos = head(wav_embed)
+
+        # weighted_mel = extract_weighted_mel_spectrogram(
+        #     wave,
+        #     device,
+        #     window_sizes=[256, 512, 768, 1024],
+        #     hop_lengths=[64, 128, 256, 512],
+        #     n_mels=32, weights=None
+        # )
+
+        logits, probs, pred_mos = head(wav_embed)
+        soft_targets = head.build_soft_targets(mos, sigma=0.25)
+        kl_loss = head.ordinal_loss(logits, soft_targets)
+        l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
+        loss = kl_loss + 0.5 * l1_loss
+
         mse = head.mse_monitor(pred_mos, mos).item()
         total_mse += mse
+        total_loss += loss.item()
         n_batches += 1
         preds.append(pred_mos.cpu())
         targets.append(mos.cpu())
     preds = torch.cat(preds)
     targets = torch.cat(targets)
     mse_mean = total_mse / max(1, n_batches)
-    log(f"{desc} | MSE {mse_mean:.4f}")
-    return preds, targets, mse_mean
+    # loss_mean = total_loss / max(1, n_batches)
+    loss_mean = total_loss / VALSTEPS
+    log(f"{desc} | MSE {mse_mean:.4f} | Loss {loss_mean:.4f}")
+    return preds, targets, mse_mean, loss_mean
 
 @torch.no_grad()
 def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print, seq_mode=False):
@@ -90,7 +121,7 @@ def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print,
     Compute symmetric conformal interval half-width (q_hat) using absolute residuals.
     q_hat = quantile_{1-alpha}( |y - f(x)| )
     """
-    preds, targets, _ = eval_point(head, model, calib_loader, device, desc="Calibration (point)")
+    preds, targets, _, _ = eval_point(head, model, calib_loader, device, desc="Calibration (point)")
     residuals = (targets - preds).abs()
     q_hat = torch.quantile(residuals, 1 - alpha).item()
     log(f"Conformal calibration | alpha={alpha:.3f} | q_hat={q_hat:.4f}")
@@ -188,11 +219,13 @@ def main():
             # log(f"====[INFO] Wav2Vec2 hidden size: {UPSTREAM_OUT_DIM}====")
             log(f"====[INFO] Using Wav2Vec2 upstream.====")
 
-        head_cls = TransformerPredictionHead1 if args.use_transformer_head else PredictionHead
+        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
         print('Using head class: ' + str(head_cls))
         head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
         # optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
-        optimizer = optim.SGD(head.parameters(), lr=5e-4, momentum=0.9)    
+        optimizer = optim.SGD(head.parameters(), lr=1e-4, momentum=0.9, weight_decay=1e-4)    
+        # optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-3)
+
 
         log(f"[DEVICE] torch.cuda.is_available={torch.cuda.is_available()}")
         if torch.cuda.is_available():
@@ -204,14 +237,9 @@ def main():
         for p in model.parameters():
             p.requires_grad = False
 
-        best_valid_mse = float("inf")
-        q_hat_final = None
-        patience_ctr = 0
-        early_stopped = False
-        last_saved_epoch = None
-
+        best_valid_loss = float("inf")
         # Track metrics for plotting
-        metrics = {"train_mse": [], "valid_mse": [], "q_hat": []}
+        metrics = {"train_mse": [], "valid_mse": [], "train_loss": [], "valid_loss": [], "q_hat": []}
 
         # 3. Training Loop
         for epoch in range(1, args.epochs + 1):
@@ -221,7 +249,7 @@ def main():
             )
             log(f"Epoch {epoch} Train | Loss {train_loss:.4f} | MSE {train_mse:.4f}")
 
-            _, _, valid_mse = eval_point(
+            _, _, valid_mse, valid_loss = eval_point(
                 head, model, validloader, device, desc="Validation (point)", log=log, seq_mode=args.use_transformer_head
             )
             q_hat = conformal_calibrate(
@@ -232,25 +260,28 @@ def main():
             # Save metrics
             metrics["train_mse"].append(train_mse)
             metrics["valid_mse"].append(valid_mse)
+            metrics["train_loss"].append(train_loss)
+            metrics["valid_loss"].append(valid_loss)
             metrics["q_hat"].append(q_hat)
 
-            improvement = (best_valid_mse - valid_mse) > args.min_delta
+            improvement = (best_valid_loss - valid_loss) > args.min_delta
             if improvement:
-                best_valid_mse = valid_mse
+                best_valid_loss = valid_loss
                 patience_ctr = 0
-                ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}.pt")
+                ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}_{save_model_time}.pt")
                 torch.save({
                     "head_state": head.state_dict(),
                     "q_hat": q_hat,
                     "alpha": args.alpha,
                     "epoch": epoch,
-                    "best_valid_mse": best_valid_mse
+                    "best_valid_loss": best_valid_loss
                 }, ckpt_path)
-                log(f"Saved checkpoint (best MSE {best_valid_mse:.4f})")
+                log(f"Saved checkpoint (best Loss {best_valid_loss:.4f})")
+                log(f"  - {ckpt_path}")
                 last_saved_epoch = epoch
             else:
                 patience_ctr += 1
-                log(f"No improvement (Δ={best_valid_mse - valid_mse:.6f}); patience {patience_ctr}/{args.patience}")
+                log(f"No improvement (Δ={best_valid_loss - valid_loss:.6f}); patience {patience_ctr}/{args.patience}")
                 if patience_ctr >= args.patience:
                     log(f"Early stopping triggered at epoch {epoch}")
                     early_stopped = True
@@ -268,13 +299,13 @@ def main():
 
         if early_stopped:
             log(f"Early stopped. Best checkpoint was from epoch {last_saved_epoch}. Reloading for test...")
-            ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}.pt")
+            ckpt_path = os.path.join(args.out_dir, f"checkpoint_head_{args.upstream}_{save_model_time}.pt")
             if os.path.isfile(ckpt_path):
                 ckpt = torch.load(ckpt_path, map_location="cpu")
                 head.load_state_dict(ckpt["head_state"])
                 q_hat_final = ckpt.get("q_hat", q_hat_final)
 
-        preds, targets, _ = eval_point(
+        preds, targets, _, _ = eval_point(
             head, model, testloader, device, desc="Test (point)", log=log, seq_mode=args.use_transformer_head
         )
         lower, upper = apply_intervals(preds, q_hat_final)
@@ -297,13 +328,30 @@ if __name__ == "__main__":
 # python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream wav2vec --wav2vec_model facebook/wav2vec2-large
 # python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream m2d --wav2vec_model facebook/wav2vec2-large-960h
 
+'''
+1. python src/pipeline2.py --upstream wav2vec
+2. python src/pipeline2.py --upstream wav2vec --stratified_batches --strat_bins 5
+
+
 
 '''
+
+
+
+'''
+CUDA_VISIBLE_DEVICES=0 python src/pipeline2.py --upstream wav2vec
+
+
+CUDA_VISIBLE_DEVICES=1 ./predict.sh wav2vec
+
+
 Start a new session: tmux
 Start with a name: tmux new -s mysession
 Detach (leave it running): Ctrl+b then d
 List sessions: tmux ls
-Attach to existing: tmux attach -t mysession
+Attach to existing: 
+    tmux attach -t mysession
+    tmux attach -t mysession1
 Create if absent (attach or new): tmux new -As mysession
 Kill a session: tmux kill-session -t mysession
 Common splits: Ctrl+b then % (vertical split) Ctrl+b then " (horizontal split)
@@ -318,4 +366,6 @@ Ideas:
     4. Try different upstream models (e.g., Wav2CLIP, HuBERT, WavLM, etc.)
     
     Model:
+
+    https://towardsdatascience.com/uncertainty-quantification-and-why-you-should-care-3f8a651f1956/
 '''

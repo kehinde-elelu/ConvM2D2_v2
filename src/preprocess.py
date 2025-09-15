@@ -217,3 +217,54 @@ class StratifiedBatchSampler(Sampler):
         if self.drop_last:
             return total // self.batch_size
         return (total + self.batch_size - 1) // self.batch_size
+    
+
+def extract_weighted_mel_spectrogram(wave, device, window_sizes=[256, 512, 768, 1024], hop_lengths=[64, 128, 256, 512], n_mels=64, weights=None):
+    """
+    Extracts mel spectrograms with different STFT settings and returns their weighted sum.
+    Args:
+        wave: Tensor of shape (batch_size, 1, T) or (batch_size, T)
+        device: torch.device
+        window_sizes: list of n_fft values
+        hop_lengths: list of hop_length values
+        n_mels: number of mel bins
+        weights: list or tensor of weights (should sum to 1), default is uniform
+    Returns:
+        weighted_mel: Tensor of shape (batch_size, n_mels, max_len)
+    """
+    if wave.dim() == 3:
+        wave_spectrogram = wave.squeeze(1)  # (batch_size, T)
+    else:
+        wave_spectrogram = wave
+    mel_specs = []
+    max_len = 0
+    for win_size, hop_len in zip(window_sizes, hop_lengths):
+        mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=16000,
+            n_fft=win_size,
+            hop_length=hop_len,
+            n_mels=n_mels
+        ).to(device)
+        mel_spec = mel_transform(wave_spectrogram)  # (batch_size, n_mels, time_steps)
+        mel_specs.append(mel_spec)
+        max_len = max(max_len, mel_spec.shape[-1])
+
+    # Pad all to max_len along time dimension
+    for i in range(len(mel_specs)):
+        pad_len = max_len - mel_specs[i].shape[-1]
+        if pad_len > 0:
+            mel_specs[i] = torch.nn.functional.pad(mel_specs[i], (0, pad_len))
+
+    # print("*"*20, f'Num Mel Spectrograms: {len(mel_specs)} | Shape: {mel_specs[0].shape}', "*"*20)
+
+    # Weighted sum
+    if weights is None:
+        weights = torch.tensor([1.0 / len(mel_specs)] * len(mel_specs), device=device)
+    else:
+        weights = torch.tensor(weights, device=device)
+    mel_stack = torch.stack(mel_specs, dim=0)  # (num_specs, batch_size, n_mels, max_len)
+    weights = weights.view(-1, 1, 1, 1)  # (num_specs, 1, 1, 1)
+    weighted_mel = (mel_stack * weights).sum(dim=0)  # (batch_size, n_mels, max_len)
+
+    # print("*"*20, 'Weighted Mel Spectrogram shape: ' + str(weighted_mel.shape), "*"*20)
+    return weighted_mel

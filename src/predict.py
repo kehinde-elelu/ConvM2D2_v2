@@ -13,7 +13,8 @@ from transformers import Wav2Vec2Model
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, forward_feature
-from NNmodel import PredictionHead, TransformerPredictionHead, TransformerPredictionHead1
+from NNmodel import PredictionHead, TransformerPredictionHead
+from preprocess import extract_weighted_mel_spectrogram
 
 
 EXTERNAL_M2D_ROOT = "/egr/research-deeptech/elelukeh/MOS_project/M2D"
@@ -100,6 +101,15 @@ def predict(model, head, loader, device, upstream, seq_mode):
         mos = mos.to(device)
 
         wav_embed = forward_feature(model, waves, device=device, keep_sequence=seq_mode)
+
+        # weighted_mel = extract_weighted_mel_spectrogram(
+        #     waves,
+        #     device,
+        #     window_sizes=[256, 512, 768, 1024],
+        #     hop_lengths=[64, 128, 256, 512],
+        #     n_mels=64, weights=None
+        # )
+
         _, _, pred_mos = head(wav_embed)
 
         preds.append(pred_mos.cpu())
@@ -253,7 +263,7 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    head_cls = TransformerPredictionHead1 if args.use_transformer_head else PredictionHead
+    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
     head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
     # Load checkpoint

@@ -4,6 +4,7 @@ import torch, torchaudio
 import datetime
 from torch.utils.data.dataset import Dataset
 import matplotlib.pyplot as plt
+import csv
 
 warnings.filterwarnings(
     "ignore",
@@ -135,7 +136,7 @@ def export_learning_curves(metrics, out_dir, upstream, last_saved_epoch, log):
     """
     Save metrics.csv and learning_curve_<upstream>.png. Returns dict with paths and best_epoch.
     """
-    if not metrics.get("train_mse"):
+    if not metrics.get("train_loss"):
         return None
     os.makedirs(out_dir, exist_ok=True)
 
@@ -143,37 +144,37 @@ def export_learning_curves(metrics, out_dir, upstream, last_saved_epoch, log):
     csv_path = os.path.join(out_dir, "metrics.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["epoch", "train_mse", "valid_mse", "q_hat"])
-        for i in range(len(metrics["train_mse"])):
+        w.writerow(["epoch", "train_loss", "valid_loss", "q_hat"])
+        for i in range(len(metrics["train_loss"])):
             w.writerow([
                 i + 1,
-                metrics["train_mse"][i],
-                metrics["valid_mse"][i] if i < len(metrics["valid_mse"]) else "",
+                metrics["train_loss"][i],
+                metrics["valid_loss"][i] if i < len(metrics["valid_loss"]) else "",
                 metrics["q_hat"][i] if i < len(metrics["q_hat"]) else ""
             ])
 
     # Best/early-stop epoch
-    if metrics.get("valid_mse"):
+    if metrics.get("valid_loss"):
         if last_saved_epoch is not None:
             best_epoch = last_saved_epoch
         else:
-            best_epoch = min(range(len(metrics["valid_mse"])), key=lambda i: metrics["valid_mse"][i]) + 1
+            best_epoch = min(range(len(metrics["valid_loss"])), key=lambda i: metrics["valid_loss"][i]) + 1
     else:
-        best_epoch = len(metrics["train_mse"])
+        best_epoch = len(metrics["train_loss"])
 
     # Plot
-    epochs = list(range(1, len(metrics["train_mse"]) + 1))
+    epochs = list(range(1, len(metrics["train_loss"]) + 1))
     plt.figure(figsize=(8, 4.5))
-    plt.plot(epochs, metrics["train_mse"], label="Train MSE")
-    if metrics.get("valid_mse"):
-        plt.plot(epochs, metrics["valid_mse"], label="Valid MSE")
+    plt.plot(epochs, metrics["train_loss"], label="Train LOSS")
+    if metrics.get("valid_loss"):
+        plt.plot(epochs, metrics["valid_loss"], label="Valid LOSS")
     plt.axvline(best_epoch, color="red", linestyle="--", alpha=0.7, label=f"Best/Early stop @ {best_epoch}")
     plt.xlabel("Epoch")
-    plt.ylabel("MSE")
+    plt.ylabel("LOSS")
     plt.title(f"Learning Curves ({upstream})")
     plt.legend()
     plt.tight_layout()
-    png_path = os.path.join(out_dir, f"learning_curve_{upstream}.png")
+    png_path = os.path.join(out_dir, "images", f"learning_curve_{upstream}_{datetime.datetime.now().strftime('run_%Y%m%d_%H%M%S.txt')}.png")
     plt.savefig(png_path, dpi=150)
     plt.close()
 

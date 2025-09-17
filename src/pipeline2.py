@@ -16,8 +16,8 @@ import matplotlib.pyplot as plt
 # import laion_clap
 from transformers import Wav2Vec2Model
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature, export_learning_curves, apply_intervals
-from NNmodel import PredictionHead, TransformerPredictionHead
-from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler, extract_weighted_mel_spectrogram
+from NNmodel import PredictionHead_v3, TransformerPredictionHead
+from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler, extract_weighted_mel_spectrogram, batch_multi_spec_spectrograms_librosa
 
 import random
 random.seed(1984)
@@ -46,15 +46,26 @@ def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
 
+        spec_cfgs = [
+            {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
+            {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
+            {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
+            {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
+        ]
+        weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
+
+        # weighted_mel = batch_spectrograms(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, device=device)
+        # weighted_mel = batch_spectrograms_librosa(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, sr=16000, device=None)
+        # print("*"*20, 'weighted_mel shape: ' + str(weighted_mel.shape), "*"*20)
         # weighted_mel = extract_weighted_mel_spectrogram(
         #     wave,
         #     device,
         #     window_sizes=[256, 512, 768, 1024],
         #     hop_lengths=[64, 128, 256, 512],
-        #     n_mels=64, weights=None
+        #     n_mels=32, weights=None
         # )
 
-        logits, probs, pred_mos = head(wav_embed)
+        logits, probs, pred_mos = head(wav_embed, spectrogram_x=weighted_mel)
         soft_targets = head.build_soft_targets(mos, sigma=0.25)
         kl_loss = head.ordinal_loss(logits, soft_targets)
         l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
@@ -87,6 +98,17 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
 
+        spec_cfgs = [
+            {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
+            {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
+            {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
+            {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
+        ]
+        weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
+
+        # weighted_mel = batch_spectrograms(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, device=device)
+        # weighted_mel = batch_spectrograms_librosa(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, sr=16000, device=None)
+        # print("*"*20, 'weighted_mel shape: ' + str(weighted_mel.shape), "*"*20)
         # weighted_mel = extract_weighted_mel_spectrogram(
         #     wave,
         #     device,
@@ -95,7 +117,7 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
         #     n_mels=32, weights=None
         # )
 
-        logits, probs, pred_mos = head(wav_embed)
+        logits, probs, pred_mos = head(wav_embed, spectrogram_x=weighted_mel)
         soft_targets = head.build_soft_targets(mos, sigma=0.25)
         kl_loss = head.ordinal_loss(logits, soft_targets)
         l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
@@ -219,7 +241,7 @@ def main():
             # log(f"====[INFO] Wav2Vec2 hidden size: {UPSTREAM_OUT_DIM}====")
             log(f"====[INFO] Using Wav2Vec2 upstream.====")
 
-        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
+        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead_v3
         print('Using head class: ' + str(head_cls))
         head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
         # optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -329,17 +351,26 @@ if __name__ == "__main__":
 # python src/pipeline2.py --use_transformer_head --stratified_batches --strat_bins 5 --upstream m2d --wav2vec_model facebook/wav2vec2-large-960h
 
 '''
-1. python src/pipeline2.py --upstream wav2vec
+1. CUDA_VISIBLE_DEVICES=2 python src/pipeline2.py --upstream m2d
 2. python src/pipeline2.py --upstream wav2vec --stratified_batches --strat_bins 5
 
 
+two runnnng 
+1. with stratified batches, SGD
+2. without stratified batches,  AdamW
 
+
+without stratified batches, SGD, increasing the nn layers 
 '''
 
 
 
 '''
 CUDA_VISIBLE_DEVICES=0 python src/pipeline2.py --upstream wav2vec
+
+
+now doing =====>
+CUDA_VISIBLE_DEVICES=1 python src/pipeline2.py --upstream m2d
 
 
 CUDA_VISIBLE_DEVICES=1 ./predict.sh wav2vec

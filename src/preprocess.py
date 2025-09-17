@@ -1,5 +1,5 @@
-
 import torch, torchaudio
+import librosa
 from typing import List
 from torch.utils.data import DataLoader, Sampler, Dataset
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger
@@ -268,3 +268,112 @@ def extract_weighted_mel_spectrogram(wave, device, window_sizes=[256, 512, 768, 
 
     # print("*"*20, 'Weighted Mel Spectrogram shape: ' + str(weighted_mel.shape), "*"*20)
     return weighted_mel
+
+
+
+def batch_spectrograms(wave_batch, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, device=None):
+    batch_size = wave_batch.size(0)
+    if device is None:
+        device = wave_batch.device
+    specs = []
+    for i in range(batch_size):
+        frames = []
+        for _ in range(num_frames):
+            start = torch.randint(0, wave_batch.size(1) - n_fft, (1,)).item()
+            crop = wave_batch[i, start:start + n_fft].to(device)  # Ensure crop is on correct device
+            mel_transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=16000, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+            ).to(device)
+            mel = mel_transform(crop.unsqueeze(0))  # (1, n_mels, time)
+            frames.append(mel)
+        frames = torch.stack(frames, dim=0)
+        specs.append(frames)
+    specs = torch.stack(specs, dim=0)
+    specs = specs.permute(0, 1, 2, 3, 4)
+    return specs
+
+import numpy as np
+import torch
+
+# def batch_spectrograms_librosa(wave_batch, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, sr=16000, device=None):
+#     """
+#     wave_batch: (batch_size, T) - torch tensor
+#     Returns: (batch_size, num_frames, 1, n_mels, time)
+#     """
+#     batch_size = wave_batch.size(0)
+#     specs = []
+#     for i in range(batch_size):
+#         frames = []
+#         wav_np = wave_batch[i].cpu().numpy()  # librosa expects numpy array
+#         T = wav_np.shape[-1]
+#         for _ in range(num_frames):
+#             # Random crop or select window
+#             if T > n_fft:
+#                 start = np.random.randint(0, T - n_fft)
+#                 crop = wav_np[start:start + n_fft]
+#             else:
+#                 crop = wav_np
+#             # Compute mel spectrogram with librosa
+#             mel = librosa.feature.melspectrogram(
+#                 y=crop,
+#                 sr=sr,
+#                 n_fft=n_fft,
+#                 hop_length=hop_length,
+#                 n_mels=n_mels
+#             )
+#             mel_db = librosa.power_to_db(mel, ref=np.max)
+#             mel_tensor = torch.tensor(mel_db, dtype=torch.float32)
+#             mel_tensor = mel_tensor.unsqueeze(0)  # (1, n_mels, time)
+#             if device is not None:
+#                 mel_tensor = mel_tensor.to(device)
+#             frames.append(mel_tensor)
+#         frames = torch.stack(frames, dim=0)  # (num_frames, 1, n_mels, time)
+#         specs.append(frames)
+#     specs = torch.stack(specs, dim=0)  # (batch_size, num_frames, 1, n_mels, time)
+#     specs = specs.permute(0, 1, 2, 3, 4)  # (B, num_frames, C, height, width)
+#     return specs
+
+
+
+import librosa
+import numpy as np
+import torch
+
+def batch_multi_spec_spectrograms_librosa(
+    wave_batch, num_frames=4, spec_cfgs=None, sr=16000, device=None
+):
+    batch_size = wave_batch.size(0)
+    num_specs = len(spec_cfgs)
+    specs = []
+    for i in range(batch_size):
+        frames = []
+        wav_np = wave_batch[i].cpu().numpy()
+        T = wav_np.shape[-1]
+        for _ in range(num_frames):
+            if T > max(cfg['n_fft'] for cfg in spec_cfgs):
+                start = np.random.randint(0, T - max(cfg['n_fft'] for cfg in spec_cfgs))
+                crop = wav_np[start:start + max(cfg['n_fft'] for cfg in spec_cfgs)]
+            else:
+                crop = wav_np
+            for spec_cfg in spec_cfgs:
+                mel = librosa.feature.melspectrogram(
+                    y=crop,
+                    sr=sr,
+                    n_fft=spec_cfg['n_fft'],
+                    hop_length=spec_cfg['hop_length'],
+                    n_mels=spec_cfg['n_mels']
+                )
+                mel_db = librosa.power_to_db(mel, ref=np.max)
+                # Stack to 3 channels for EfficientNet
+                mel_db_3ch = np.stack([mel_db, mel_db, mel_db], axis=0)  # (3, n_mels, time)
+                mel_tensor = torch.tensor(mel_db_3ch, dtype=torch.float32)  # (3, n_mels, time)
+                if device is not None:
+                    mel_tensor = mel_tensor.to(device)
+                frames.append(mel_tensor)
+        # Pad all frames to the same time dimension
+        max_time = max(f.shape[-1] for f in frames)
+        frames = [torch.nn.functional.pad(f, (0, max_time - f.shape[-1])) for f in frames]
+        frames = torch.stack(frames, dim=0)  # (num_frames * num_specs, 3, n_mels, max_time)
+        specs.append(frames)
+    specs = torch.stack(specs, dim=0)  # (batch_size, num_frames * num_specs, 3, n_mels, max_time)
+    return specs

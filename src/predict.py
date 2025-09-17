@@ -13,8 +13,8 @@ from transformers import Wav2Vec2Model
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, forward_feature
-from NNmodel import PredictionHead, TransformerPredictionHead
-from preprocess import extract_weighted_mel_spectrogram
+from NNmodel import PredictionHead_v3, TransformerPredictionHead
+from preprocess import extract_weighted_mel_spectrogram, batch_multi_spec_spectrograms_librosa
 
 
 EXTERNAL_M2D_ROOT = "/egr/research-deeptech/elelukeh/MOS_project/M2D"
@@ -101,16 +101,25 @@ def predict(model, head, loader, device, upstream, seq_mode):
         mos = mos.to(device)
 
         wav_embed = forward_feature(model, waves, device=device, keep_sequence=seq_mode)
+        
+        spec_cfgs = [
+            {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
+            {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
+            {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
+            {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
+        ]
+        weighted_mel = batch_multi_spec_spectrograms_librosa(waves, num_frames=4, spec_cfgs=spec_cfgs, device=device)
+
 
         # weighted_mel = extract_weighted_mel_spectrogram(
         #     waves,
         #     device,
         #     window_sizes=[256, 512, 768, 1024],
         #     hop_lengths=[64, 128, 256, 512],
-        #     n_mels=64, weights=None
+        #     n_mels=32, weights=None
         # )
 
-        _, _, pred_mos = head(wav_embed)
+        _, _, pred_mos = head(wav_embed, spectrogram_x=weighted_mel)
 
         preds.append(pred_mos.cpu())
         targets.append(mos.cpu())
@@ -263,7 +272,7 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
+    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead_v3
     head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
     # Load checkpoint

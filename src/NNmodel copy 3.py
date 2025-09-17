@@ -15,56 +15,9 @@ random.seed(1984)
 #     except Exception:
 #         MultiSpecModelV2 = None  # optional; only needed if activated
 
+from utmosv2.model import MultiSpecModelV2
 import importlib
-import types
-from utmosv2.model import MultiSpecModelV2, SSLMultiSpecExtModelV2
-
-# Build a Config-like object that SSLMultiSpecExtModelV2 expects
-def _make_cfg():
-    mod = importlib.import_module("utmosv2.config.fusion_stage3")
-    base = getattr(mod, "cfg", None) or getattr(mod, "config", None) or mod
-    if isinstance(base, types.ModuleType):
-        ns = types.SimpleNamespace(**{k: getattr(base, k) for k in dir(base) if not k.startswith("__")})
-    else:
-        ns = base
-
-    # Ensure required attributes with safe defaults
-    if not hasattr(ns, "phase"): ns.phase = "test"
-    if not hasattr(ns, "weight"): ns.weight = None
-    if not hasattr(ns, "now_fold"): ns.now_fold = 0
-    if not hasattr(ns, "data_config"): ns.data_config = None
-
-    # Ensure split with seed
-    split = getattr(ns, "split", None)
-    if isinstance(split, dict):
-        ns.split = types.SimpleNamespace(**split)
-    elif split is None or not hasattr(split, "seed"):
-        ns.split = types.SimpleNamespace(seed=42)
-    if not hasattr(ns.split, "seed"):
-        ns.split.seed = 42
-
-    # Ensure nested model.ssl_spec with defaults
-    model = getattr(ns, "model", None)
-    if isinstance(model, dict):
-        ns.model = types.SimpleNamespace(**model)
-        model = ns.model
-    if model is None:
-        ns.model = types.SimpleNamespace()
-        model = ns.model
-    ssl_spec = getattr(model, "ssl_spec", None)
-    if isinstance(ssl_spec, dict):
-        model.ssl_spec = types.SimpleNamespace(**ssl_spec)
-        ssl_spec = model.ssl_spec
-    if ssl_spec is None:
-        model.ssl_spec = types.SimpleNamespace()
-        ssl_spec = model.ssl_spec
-    for k, v in dict(ssl_weight=None, spec_weight=None, freeze=True, num_classes=1).items():
-        if not hasattr(ssl_spec, k):
-            setattr(ssl_spec, k, v)
-
-    return ns
-
-cfg = _make_cfg()
+cfg = importlib.import_module("utmosv2.config.fusion_stage3")
 PRETRAINED_UTMOS_PATH = "/home/elelukeh/.cache/utmosv2/models/fusion_stage3/fold0_s42_best_model.pth"
 
 
@@ -127,207 +80,80 @@ class PredictionHead(torch.nn.Module):
 
 
 
-class PredictionHead_v2(torch.nn.Module):
-    """
-    Ordinal-aware MOS predictor via classification over K bins (1..5) with Gaussian label softening.
-    """
-    def __init__(self, in_dim=768, num_bins=20, hidden=256, dropout=0.3):
-        super().__init__()
-        self.num_bins = num_bins
-        # Equal-width bin centers from 1 to 5 inclusive
-        self.register_buffer("bins", torch.linspace(1.0, 5.0, num_bins))
-
-        in_dim_ = in_dim + 5120 
-        self.net = torch.nn.Sequential(
-            torch.nn.LayerNorm(in_dim_),
-            torch.nn.Linear(in_dim_, hidden),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden, num_bins)
-        )
-        # Instantiate once so .to(device) moves it with the head
-        self.spec_encoder = MultiSpecModelV2(cfg)
-        self._load_spec_encoder(PRETRAINED_UTMOS_PATH)
-        for p in self.spec_encoder.parameters():
-            p.requires_grad = False
-        self.spec_encoder.eval()
-        if hasattr(self.spec_encoder, "fc"):
-            self.spec_encoder.fc = nn.Identity()
-
-    def forward(self, features, spectrogram_x):
-        # If features is (B, T, D), pool over T
-        if features.dim() == 3:
-            features_pooled = features.mean(dim=1)  # (B, D)
-        else:
-            features_pooled = features  # (B, D)
-
-        # Ensure spectrogram_x is on the same device/dtype as the spec encoder
-        enc_dev = next(self.spec_encoder.parameters()).device
-        enc_dtype = next(self.spec_encoder.parameters()).dtype
-        spectrogram_x = spectrogram_x.to(device=enc_dev, dtype=enc_dtype)
-
-        with torch.no_grad():
-            spec_features = self.spec_encoder(spectrogram_x)
-
-        # Optional: remove or keep for debugging
-        # print("*"*20, "shape of spec_features:", spec_features.shape, "*"*20)
-        # print("*"*20, "shape of features_pooled:", features_pooled.shape, "*"*20)
-
-        fused = torch.cat([features_pooled, spec_features], dim=1)  # (B, D + spec_dim)
-        # print("*"*20, "shape of fused:", fused.shape, "*"*20) # 5120 + 768 = 5888
-
-        logits = self.net(fused)
-        probs = torch.softmax(logits, dim=-1)
-        expected = (probs * self.bins).sum(dim=-1)
-        return logits, probs, expected
-
-    @torch.no_grad()
-    def build_soft_targets(self, mos, sigma=0.25):
-        """
-        mos: (B,) continuous scores in [1,5]
-        Returns soft target distribution (B, K) using Gaussian kernel:
-        y_k ∝ exp(-(s - c_k)^2 / (2 σ^2))
-        """
-        diff2 = (mos.unsqueeze(1) - self.bins.unsqueeze(0)) ** 2
-        weights = torch.exp(-diff2 / (2 * sigma * sigma))
-        return weights / weights.sum(dim=1, keepdim=True)
-
-    def ordinal_loss(self, logits, soft_targets):
-        """
-        KL divergence between predicted log-probs and soft targets.
-        """
-        log_probs = torch.log_softmax(logits, dim=-1)
-        return torch.nn.functional.kl_div(log_probs, soft_targets, reduction="batchmean")
-
-    def mse_monitor(self, expected_mos, target_mos):
-        return torch.nn.functional.mse_loss(expected_mos, target_mos)
-
-    def _load_spec_encoder(self, ckpt_path: str):
-        if not os.path.isfile(ckpt_path):
-            print(f"[WARN] UTMOS checkpoint not found: {ckpt_path}")
-            return
-        obj = torch.load(ckpt_path, map_location="cpu")
-        # Extract a state_dict
-        state = None
-        if isinstance(obj, dict):
-            for k in ("state_dict", "model_state_dict", "model", "net", "spec_encoder", "spec_model"):
-                if k in obj and isinstance(obj[k], dict):
-                    state = obj[k]; break
-            if state is None and all(isinstance(v, torch.Tensor) for v in obj.values()):
-                state = obj
-        else:
-            state = obj
-
-        if state is None:
-            print(f"[WARN] No compatible state_dict in {ckpt_path}")
-            return
-
-        # Clean prefixes and drop fc.* to avoid shape mismatch
-        clean = {}
-        for k, v in state.items():
-            if k.startswith("module."):     k = k[7:]
-            if k.startswith("model."):      k = k[6:]
-            if k.startswith("spec_long."):  k = k[10:]
-            if k.startswith("spec_encoder.") or k.startswith("spec_model."):
-                k = k.split(".", 1)[1]
-            if k.startswith("fc."):         # drop classifier head weights
-                continue
-            clean[k] = v
-
-        # Load non-strict to ignore any leftover mismatches
-        self.spec_encoder.load_state_dict(clean, strict=False)
+# class PredictionHead_v2(torch.nn.Module):
+#     """
+#     Ordinal-aware MOS predictor via classification over K bins (1..5) with Gaussian label softening.
+#     """
+#     def __init__(self, in_dim=768, num_bins=20, hidden=256, dropout=0.3):
+#         super().__init__()
+#         self.num_bins = num_bins
+#         # Equal-width bin centers from 1 to 5 inclusive
+#         self.register_buffer("bins", torch.linspace(1.0, 5.0, num_bins))
+#         self.net = torch.nn.Sequential(
+#             torch.nn.LayerNorm(in_dim),
+#             torch.nn.Linear(in_dim, hidden),
+#             torch.nn.ReLU(),
+#             torch.nn.Dropout(dropout),
+#             torch.nn.Linear(hidden, num_bins)
+#         )
+#         # Instantiate once so .to(device) moves it with the head
+#         self.spec_encoder = MultiSpecModelV2(cfg)
+        
+#         self.spec_encoder.load_state_dict(torch.load(PRETRAINED_UTMOS_PATH))
+        
+#         for p in self.spec_encoder.parameters():
+#             p.requires_grad = False
+#         self.spec_encoder.eval()
 
 
+#         if hasattr(self.spec_encoder, "fc"):
+#             self.spec_encoder.fc = nn.Identity()
 
-class PredictionHead_v3(torch.nn.Module):
-    """
-    Ordinal-aware MOS predictor via classification over K bins (1..5) with Gaussian label softening.
-    """
-    def __init__(self, in_dim=768, num_bins=20, hidden=256, dropout=0.3):
-        super().__init__()
-        self.num_bins = num_bins
-        self.register_buffer("bins", torch.linspace(1.0, 5.0, num_bins))
+#     def forward(self, features, spectrogram_x):
+#         # If features is (B, T, D), pool over T
+#         if features.dim() == 3:
+#             features_pooled = features.mean(dim=1)  # (B, D)
+#         else:
+#             features_pooled = features  # (B, D)
 
-        # Use LazyLinear to avoid hardcoding spec feature dim (varies in SSLMultiSpecExtModelV2)
-        self.net = torch.nn.Sequential(
-            nn.LazyLinear(hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_bins)
-        )
+#         # Ensure spectrogram_x is on the same device/dtype as the spec encoder
+#         enc_dev = next(self.spec_encoder.parameters()).device
+#         enc_dtype = next(self.spec_encoder.parameters()).dtype
+#         spectrogram_x = spectrogram_x.to(device=enc_dev, dtype=enc_dtype)
 
-        # Debug: print what attributes cfg actually has
-        print("-"*20, f"Config attributes: {dir(cfg)}", "-"*20)
+#         with torch.no_grad():
+#             spec_features = self.spec_encoder(spectrogram_x)
 
-        # SSL variant as the spec encoder backbone
-        self.spec_encoder = SSLMultiSpecExtModelV2(cfg)
+#         # Optional: remove or keep for debugging
+#         # print("*"*20, "shape of spec_features:", spec_features.shape, "*"*20)
 
-        # Bypass classifier BEFORE loading so fc.* keys become "unexpected" and are ignored
-        if hasattr(self.spec_encoder, "fc"):
-            self.spec_encoder.fc = nn.Identity()
+#         logits = self.net(features_pooled)
+#         probs = torch.softmax(logits, dim=-1)
+#         expected = (probs * self.bins).sum(dim=-1)
+#         return logits, probs, expected
 
-        # Load pretrained weights, filtering and cleaning keys
-        raw = torch.load(PRETRAINED_UTMOS_PATH, map_location="cpu")
-        state = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
+#     @torch.no_grad()
+#     def build_soft_targets(self, mos, sigma=0.25):
+#         """
+#         mos: (B,) continuous scores in [1,5]
+#         Returns soft target distribution (B, K) using Gaussian kernel:
+#         y_k ∝ exp(-(s - c_k)^2 / (2 σ^2))
+#         """
+#         diff2 = (mos.unsqueeze(1) - self.bins.unsqueeze(0)) ** 2
+#         weights = torch.exp(-diff2 / (2 * sigma * sigma))
+#         return weights / weights.sum(dim=1, keepdim=True)
 
-        clean = {}
-        for k, v in state.items():
-            if k.startswith("module."): k = k[7:]
-            if k.startswith("model."): k = k[6:]
-            if k.startswith("spec_encoder.") or k.startswith("spec_model."):
-                k = k.split(".", 1)[1]
-            if k.startswith("fc."):      # drop classifier tensors causing mismatch
-                continue
-            clean[k] = v
+#     def ordinal_loss(self, logits, soft_targets):
+#         """
+#         KL divergence between predicted log-probs and soft targets.
+#         """
+#         log_probs = torch.log_softmax(logits, dim=-1)
+#         return torch.nn.functional.kl_div(log_probs, soft_targets, reduction="batchmean")
 
-        self.spec_encoder.load_state_dict(clean, strict=False)
+#     def mse_monitor(self, expected_mos, target_mos):
+#         return torch.nn.functional.mse_loss(expected_mos, target_mos)
 
-        # Freeze and eval
-        for p in self.spec_encoder.parameters():
-            p.requires_grad = False
-        self.spec_encoder.eval()
 
-    def forward(self, features, spectrogram_x):
-        # Pool upstream features if sequence
-        if features.dim() == 3:
-            features_pooled = features.mean(dim=1)
-        else:
-            features_pooled = features
-
-        # Ensure inputs are on encoder device/dtype
-        enc_dev = next(self.spec_encoder.parameters()).device
-        enc_dtype = next(self.spec_encoder.parameters()).dtype
-        spectrogram_x = spectrogram_x.to(device=enc_dev, dtype=enc_dtype)
-        # features_pooled = features_pooled.to(device=enc_dev, dtype=enc_dtype)
-
-        with torch.no_grad():
-            # Dataset one-hot for spec_long
-            B = spectrogram_x.size(0)
-            num_dataset = getattr(self.spec_encoder, "num_dataset", 1)
-            d = torch.zeros(B, num_dataset, device=enc_dev, dtype=enc_dtype)
-
-            # Use only the spectrogram branch; do NOT call the SSL (raw audio) branch
-            # spec_long expects (x2, d)
-            spec_features = self.spec_encoder.spec_long(spectrogram_x, d)
-
-        fused = torch.cat([features_pooled, spec_features], dim=1)
-        logits = self.net(fused)
-        probs = torch.softmax(logits, dim=-1)
-        expected = (probs * self.bins).sum(dim=-1)
-        return logits, probs, expected
-
-    @torch.no_grad()
-    def build_soft_targets(self, mos, sigma=0.25):
-        diff2 = (mos.unsqueeze(1) - self.bins.unsqueeze(0)) ** 2
-        weights = torch.exp(-diff2 / (2 * sigma * sigma))
-        return weights / weights.sum(dim=1, keepdim=True)
-
-    def ordinal_loss(self, logits, soft_targets):
-        log_probs = torch.log_softmax(logits, dim=-1)
-        return torch.nn.functional.kl_div(log_probs, soft_targets, reduction="batchmean")
-
-    def mse_monitor(self, expected_mos, target_mos):
-        return torch.nn.functional.mse_loss(expected_mos, target_mos)
 
 
 
@@ -519,7 +345,7 @@ class TransformerPredictionHead_v3(torch.nn.Module):
             x = x.unsqueeze(1)  # (B,1,D)
         h = self.transformer(x)  # (B,T,D)
         q = self.query.unsqueeze(0).unsqueeze(1)  # (1,1,D)
-        attn_logits = (h * q).sum(-1)  # (B,T)
+        attn_logits = (h * q).sum(-1) / (h.size(-1) ** 0.5)  # (B,T)
         attn_weights = torch.softmax(attn_logits, dim=-1).unsqueeze(-1)  # (B,T,1)
         pooled = (attn_weights * h).sum(1)  # (B,D)
         pooled = self.attn_norm(pooled)

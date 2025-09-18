@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 # import laion_clap
 from transformers import Wav2Vec2Model
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, create_logger, forward_feature, export_learning_curves, apply_intervals
-from NNmodel import PredictionHead_v3, TransformerPredictionHead
+from NNmodel import PredictionHead, TransformerPredictionHead
 from preprocess import SimpleAugment, AugmentedDataset, split_for_calibration, build_loaders, StratifiedBatchSampler, extract_weighted_mel_spectrogram, batch_multi_spec_spectrograms_librosa
 
 import random
@@ -46,13 +46,13 @@ def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
 
-        spec_cfgs = [
-            {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
-            {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
-            {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
-            {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
-        ]
-        weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
+        # spec_cfgs = [
+        #     {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
+        #     {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
+        #     {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
+        #     {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
+        # ]
+        # weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
 
         # weighted_mel = batch_spectrograms(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, device=device)
         # weighted_mel = batch_spectrograms_librosa(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, sr=16000, device=None)
@@ -65,7 +65,7 @@ def train_one_epoch(head, model, loader, optimizer, device, log_interval=10, log
         #     n_mels=32, weights=None
         # )
 
-        logits, probs, pred_mos = head(wav_embed, spectrogram_x=weighted_mel)
+        logits, probs, pred_mos = head(wav_embed)
         soft_targets = head.build_soft_targets(mos, sigma=0.25)
         kl_loss = head.ordinal_loss(logits, soft_targets)
         l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
@@ -98,13 +98,13 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
         mos = mos.to(device)
         wav_embed = forward_feature(model, wave, device, keep_sequence=seq_mode)
 
-        spec_cfgs = [
-            {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
-            {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
-            {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
-            {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
-        ]
-        weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
+        # spec_cfgs = [
+        #     {'n_fft': 256, 'hop_length': 64, 'n_mels': 64},
+        #     {'n_fft': 512, 'hop_length': 128, 'n_mels': 64},
+        #     {'n_fft': 768, 'hop_length': 256, 'n_mels': 64},
+        #     {'n_fft': 1024, 'hop_length': 512, 'n_mels': 64},
+        # ]
+        # weighted_mel = batch_multi_spec_spectrograms_librosa(wave, num_frames=4, spec_cfgs=spec_cfgs, device=device)
 
         # weighted_mel = batch_spectrograms(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, device=device)
         # weighted_mel = batch_spectrograms_librosa(wave, num_frames=4, n_mels=64, n_fft=1024, hop_length=256, sr=16000, device=None)
@@ -117,7 +117,7 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
         #     n_mels=32, weights=None
         # )
 
-        logits, probs, pred_mos = head(wav_embed, spectrogram_x=weighted_mel)
+        logits, probs, pred_mos = head(wav_embed)
         soft_targets = head.build_soft_targets(mos, sigma=0.25)
         kl_loss = head.ordinal_loss(logits, soft_targets)
         l1_loss = torch.nn.functional.l1_loss(pred_mos, mos)
@@ -138,7 +138,7 @@ def eval_point(head, model, loader, device, desc="Eval", log=print, seq_mode=Fal
     return preds, targets, mse_mean, loss_mean
 
 @torch.no_grad()
-def conformal_calibrate(head, model, calib_loader, device, alpha=0.1, log=print, seq_mode=False):
+def conformal_calibrate(head, model, calib_loader, device, alpha=0.05, log=print, seq_mode=False):
     """
     Compute symmetric conformal interval half-width (q_hat) using absolute residuals.
     q_hat = quantile_{1-alpha}( |y - f(x)| )
@@ -153,7 +153,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--calib_ratio", type=float, default=0.1, help="Fraction of training set for calibration")
-    ap.add_argument("--alpha", type=float, default=0.1, help="Miscoverage level for conformal intervals")
+    ap.add_argument("--alpha", type=float, default=0.05, help="Miscoverage level for conformal intervals")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--weight", type=str,
@@ -230,7 +230,7 @@ def main():
             model = PortableM2D(weight_file=args.weight, flat_features=True).to(device)
             UPSTREAM_OUT_DIM = 768
             log("====[INFO] Using M2D upstream.====")
-        else:
+        elif args.upstream == "wav2vec":
             # Wav2Vec2 upstream
             log(f"====[INFO] Loading Wav2Vec2 model: {args.wav2vec_model}====")
             model = Wav2Vec2Model.from_pretrained(
@@ -241,7 +241,7 @@ def main():
             # log(f"====[INFO] Wav2Vec2 hidden size: {UPSTREAM_OUT_DIM}====")
             log(f"====[INFO] Using Wav2Vec2 upstream.====")
 
-        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead_v3
+        head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
         print('Using head class: ' + str(head_cls))
         head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
         # optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -370,7 +370,7 @@ CUDA_VISIBLE_DEVICES=0 python src/pipeline2.py --upstream wav2vec
 
 
 now doing =====>
-CUDA_VISIBLE_DEVICES=1 python src/pipeline2.py --upstream m2d
+CUDA_VISIBLE_DEVICES=3 python src/pipeline2.py --upstream m2d
 
 
 CUDA_VISIBLE_DEVICES=1 ./predict.sh wav2vec

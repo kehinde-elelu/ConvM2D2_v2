@@ -14,14 +14,9 @@ WAV_DIR="data/main/DATA/wav"
 OUT_DIR="result"
 
 # Checkpoint (head + q_hat from training)
-CHECKPOINT_M2D="models/checkpoint_head_m2d_run_20250916_161607.pt"
-#"models/checkpoint_head_m2d_run_20250915_215656.pt"
-# "models/checkpoint_head_m2d_run_20250915_143217.pt"
-#"models/checkpoint_head_m2d_run_20250915_150612.pt"
-#"models/checkpoint_head_m2d_run_20250914_222854.pt"
-#"checkpoint_head_m2d_run_20250914_212709.pt"
-# "models/checkpoint_head_m2d_run_20250914_220231.pt"
-# "models/checkpoint_head_m2d_run_20250914_174324.pt"
+CHECKPOINT_M2D="models/checkpoint_head_m2d_run_20250917_212709.pt"
+# "models/checkpoint_head_m2d_run_20250917_210243.pt"
+#"models/checkpoint_head_m2d_run_20250917_193514.pt"
 CHECKPOINT_W2V="models/checkpoint_head_wav2vec_run_20250914_185149.pt"
 
 # M2D weight file

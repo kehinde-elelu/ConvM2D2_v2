@@ -82,12 +82,6 @@ class PredictionHead(torch.nn.Module):
             torch.nn.Linear(in_dim, hidden),
             torch.nn.ReLU(),
             torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden, hidden),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden, hidden),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
             torch.nn.Linear(hidden, num_bins)
         )
 

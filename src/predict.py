@@ -13,7 +13,7 @@ from transformers import Wav2Vec2Model
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils import load_mos_txt, AudioLoader, Preprocessor, AudioMOSDataset, forward_feature
-from NNmodel import PredictionHead_v3, TransformerPredictionHead
+from NNmodel import PredictionHead, TransformerPredictionHead
 from preprocess import extract_weighted_mel_spectrogram, batch_multi_spec_spectrograms_librosa
 
 
@@ -46,7 +46,7 @@ def parse_args():
     ap.add_argument("--system_id_mode", type=str, default="filename_prefix",
                     choices=["filename_prefix", "parent_dir"],
                     help="Heuristic for system id extraction.")
-    ap.add_argument("--filename_delim", type=str, default="_",
+    ap.add_argument("--filename_delim", type=str, default="-",
                     help="Delimiter when using filename_prefix mode.")
     ap.add_argument("--filename_prefix_index", type=int, default=0,
                     help="Index after splitting filename by delimiter.")
@@ -145,7 +145,7 @@ def predict(model, head, loader, device, upstream, seq_mode):
     return filepaths, preds, targets
 
 
-def compute_and_print_metrics(filepaths, preds, targets, system_ids=None):
+def compute_and_print_metrics(filepaths, preds, targets, system_ids=None, checkpoint=None):
     truth_overall_array = targets.astype(float)
     pred_overall_array = preds.astype(float)
 
@@ -191,6 +191,7 @@ def compute_and_print_metrics(filepaths, preds, targets, system_ids=None):
     print('[SYSTEM] Kendall Tau rank correlation coefficient= %f' % ktau_s)
 
     metrics = {
+        "checkpoint": checkpoint,
         "utterance": {
             "overall": {
                 "MSE": float(mse_u),
@@ -221,7 +222,7 @@ def build_loader(files, scores, batch_size, num_workers, preproc):
 
 
 # ADD: system id extractor (was missing -> NameError)
-def extract_system_id(path, mode="filename_prefix", delim="_", idx=0):
+def extract_system_id(path, mode="filename_prefix", delim="-", idx=0):
     """
     Derive a system identifier from a file path.
     mode=filename_prefix: take filename (without extension), split by delim, pick part idx
@@ -272,7 +273,7 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead_v3
+    head_cls = TransformerPredictionHead if args.use_transformer_head else PredictionHead
     head = head_cls(in_dim=UPSTREAM_OUT_DIM, num_bins=20).to(device)
 
     # Load checkpoint
@@ -400,7 +401,8 @@ def main():
         filepaths=filepaths,
         preds=preds,
         targets=targets,
-        system_ids=system_ids
+        system_ids=system_ids, 
+        checkpoint=args.checkpoint
     )
 
     if interval_stats:

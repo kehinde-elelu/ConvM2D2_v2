@@ -18,4 +18,4 @@ The accessible local reproduction subset differs from the complete BVCC populati
 
 ## Data and upstream terms
 
-Obtain BVCC through its official distribution and follow its data terms. Do not infer permission to redistribute audio from the presence of this code. M2D and optional historical UTMOS components retain their upstream licenses. The bundled head is an author-supplied research artifact.
+Obtain BVCC through its official distribution and follow its data terms. Do not infer permission to redistribute audio from the presence of this code. M2D and optional historical UTMOS components retain their upstream licenses. The bundled head is an author-supplied research artifact licensed under MIT, together with the ConformalMOS code and release documentation. See the repository LICENSE and LICENSE_STATUS.md for scope.

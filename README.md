@@ -86,6 +86,6 @@ Original audio datasets, other checkpoints, private environments, logs, and foll
 
 For questions or reproducible bug reports, open a GitHub issue with the command, package versions, and error message. Please use audio you are permitted to share.
 
-## License status
+## License
 
-No software license has been selected yet. See [license status](docs/LICENSE_STATUS.md). Public testing instructions do not grant redistribution rights. Upstream M2D and UTMOS terms remain separate.
+ConformalMOS code, release documentation, and the bundled MOS prediction head are available under the [MIT license](LICENSE). M2D, UTMOS, datasets, and the linked paper retain their separate terms. See [third-party license details](docs/LICENSE_STATUS.md).

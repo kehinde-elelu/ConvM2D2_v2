@@ -20,7 +20,7 @@ GitHub Actions has been configured but has not yet run on GitHub. CUDA inference
 
 The bundled head retains its historical interpolated calibration radius. New finite-sample calibration is a separate option. Path checks do not detect shared audio under different filenames or group/content leakage.
 
-No contributor-wide software license grant has been inferred; the current license status is documented separately pending the author's choice.
+Following the author's explicit approval, the ConformalMOS code, release documentation, and bundled MOS head are licensed under MIT. Third-party materials retain their own terms; see `LICENSE_STATUS.md`.
 
 ## Preservation
 

@@ -2,6 +2,7 @@ cff-version: 1.2.0
 message: "Please cite the Interspeech 2026 ConformalMOS paper when using this software."
 title: "ConformalMOS: Uncertainty-Aware MOS Prediction with Conformal Intervals and Ordinal Modeling"
 type: software
+license: MIT
 repository-code: "https://github.com/kehinde-elelu/ConvM2D2_v2"
 url: "https://www.isca-archive.org/interspeech_2026/elelu26_interspeech.pdf"
 authors:

@@ -1,3 +1,10 @@
-# License status
+# License and third-party terms
 
-No license grant was present in the original repository. This release does not invent permission on behalf of all contributors. Public visibility alone does not grant permission to modify or redistribute the software or bundled checkpoint. The author should add an approved LICENSE before describing this release as open source. M2D and UTMOS retain their own licenses; no upstream license is overridden here.
+The author has authorized the [MIT license](../LICENSE) for the ConformalMOS code, release documentation, and bundled MOS prediction head (`assets/conformalmos_m2d_head.pt`). Retain the copyright and permission notice when redistributing these materials.
+
+The MIT grant does not relicense third-party materials:
+
+- M2D runtime and pretrained encoder weights retain the [upstream M2D terms](https://github.com/nttcslab/m2d/blob/master/LICENSE.pdf). They are downloaded separately and are not covered by this repository's MIT license.
+- The optional UTMOSv2 submodule retains its [upstream license](https://github.com/sarulab-speech/UTMOSv2/blob/main/LICENSE).
+- Speech datasets and human ratings retain their respective distribution terms and are not bundled in this release.
+- The linked Interspeech paper retains its publication terms; the repository's MIT license does not relicense the paper.

@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "Please cite the Interspeech 2026 ConformalMOS paper when using this software."
+title: "ConformalMOS: Uncertainty-Aware MOS Prediction with Conformal Intervals and Ordinal Modeling"
+type: software
+repository-code: "https://github.com/kehinde-elelu/ConvM2D2_v2"
+url: "https://www.isca-archive.org/interspeech_2026/elelu26_interspeech.pdf"
+authors:
+  - family-names: Elelu
+    given-names: Kehinde
+  - family-names: Siegel
+    given-names: Joshua E.
+  - family-names: Saffary
+    given-names: Mohammadali
+  - family-names: Ahmed
+    given-names: Tashfain
+  - family-names: Babatunde
+    given-names: Simeon
+  - family-names: Okpala
+    given-names: Ebuka
+preferred-citation:
+  type: conference-paper
+  title: "ConformalMOS: Uncertainty-Aware MOS Prediction with Conformal Intervals and Ordinal Modeling"
+  conference:
+    name: Interspeech 2026
+  year: 2026
+  url: "https://www.isca-archive.org/interspeech_2026/elelu26_interspeech.pdf"
+  authors:
+    - family-names: Elelu
+      given-names: Kehinde
+    - family-names: Siegel
+      given-names: Joshua E.
+    - family-names: Saffary
+      given-names: Mohammadali
+    - family-names: Ahmed
+      given-names: Tashfain
+    - family-names: Babatunde
+      given-names: Simeon
+    - family-names: Okpala
+      given-names: Ebuka

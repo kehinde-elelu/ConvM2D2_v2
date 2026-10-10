@@ -1,0 +1,18 @@
+{
+  "head": {
+    "file": "assets/conformalmos_m2d_head.pt",
+    "sha256": "90e0e31ccd4cd65c03502b999c32f5bd9818bc4de1a75fb97dcc0ae0da05897b",
+    "source": "checkpoint_head_m2d_run_20250917_003744.pt",
+    "alpha": 0.1,
+    "calibration": "historical interpolated quantile"
+  },
+  "m2d_runtime": {
+    "url": "https://raw.githubusercontent.com/nttcslab/m2d/3d0c4de9447c404a8d3f9f37e04f53bc902e09b3/examples/portable_m2d.py",
+    "sha256": "b64d94a18b558c0643b1bba578f215629e3dd00656284a8cbf992fbc2f563ee2"
+  },
+  "m2d_weights": {
+    "url": "https://github.com/nttcslab/m2d/releases/download/v0.1.0/m2d_clap_vit_base-80x608p16x16-240128.zip",
+    "sha256": "5156db1eceda89bbf92f3ada68eaeb16a4f178a88dcd834332e1eb41f725386f",
+    "directory": "m2d_clap_vit_base-80x608p16x16-240128"
+  }
+}

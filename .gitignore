@@ -1,39 +1,21 @@
-# Python
 __pycache__/
 *.py[cod]
-*.so
-*.egg
 *.egg-info/
-dist/
 build/
+dist/
 .env
-.venv
-
-# Jupyter Notebooks
-.ipynb_checkpoints
-
-# Data
-/data/
-*.csv
-*.tsv
-*.xlsx
-*.h5
-*.pkl
-
-# Models
-/models/
-*.h5
-*.pt
-*.pth
-*.joblib
-*.sav
-
-
-logs/
-result/
-models/
+.venv/
 env/
 venv/
-m2d/
-
-.github/
+.ipynb_checkpoints/
+.pytest_cache/
+/data/
+/models/
+/logs/
+/result/
+/results/
+/external/
+/m2d/
+*.pt
+*.pth
+!assets/conformalmos_m2d_head.pt

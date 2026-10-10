@@ -1,0 +1,9 @@
+# Optional dependencies for historical scripts; those scripts also require UTMOS setup.
+-r requirements.txt
+pandas
+scipy
+scikit-learn
+matplotlib
+librosa
+transformers
+jupyter

@@ -3,7 +3,7 @@
 ## Executed checks
 
 - Created an isolated Python 3.12 virtual environment under `/tmp`; installed the CPU PyTorch 2.8.0 / torchaudio 2.8.0 / torchvision 0.23.0 wheels and declared release dependencies. No research-environment packages were changed.
-- `python -m pytest tests -q`: **15 passed** after correcting the test checkpoint loader to use CPU mapping.
+- `python -m pytest tests -q`: **15 passed** after correcting the test checkpoint loader to use CPU mapping. Repeated from a fresh local Git clone of the release commit: **15 passed**; CLI help also passed there.
 - `python -m pip check`: **No broken requirements found**.
 - `python -m conformalmos.predict --help`: passed.
 - Pinned official M2D runtime download with `python scripts/download_m2d.py --runtime-only`: completed; SHA-256 matched the manifest.
